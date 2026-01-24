@@ -56,18 +56,23 @@ python scripts/seed_data.py
 
 ### 5. Configure Claude Code
 
-Add to your Claude Code MCP configuration on each machine:
+On each machine, add the MCP server using the CLI:
 
-```json
-{
-  "mcpServers": {
-    "claude-memory": {
-      "type": "http",
-      "url": "https://memory.friendly-robots.com/mcp"
-    }
-  }
-}
+```bash
+# Add with user scope (available in all projects)
+claude mcp add -s user -t http claude-memory https://your-domain.com/mcp \
+  -H "Authorization: Bearer YOUR_CLAUDE_MEMORY_API_KEY"
+
+# Verify it's connected
+claude mcp list
 ```
+
+**Scope options:**
+- `-s user` - Available in all projects (recommended)
+- `-s local` - Only available in current directory
+- `-s project` - Only available in current project
+
+The configuration is stored in `~/.claude.json`.
 
 ## MCP Tools
 
