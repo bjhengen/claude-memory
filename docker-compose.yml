@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: claude_memory_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: claude
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-claude_memory_secret}
+      POSTGRES_DB: claude_memory
+    volumes:
+      - claude_memory_data:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    ports:
+      - "127.0.0.1:5433:5432"  # Only accessible from localhost, different port
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U claude -d claude_memory"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - claude_memory_net
+
+  mcp:
+    build: .
+    container_name: claude_memory_mcp
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://claude:${POSTGRES_PASSWORD:-claude_memory_secret}@db:5432/claude_memory
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      CLAUDE_MEMORY_API_KEY: ${CLAUDE_MEMORY_API_KEY:-change-this-key}
+    ports:
+      - "127.0.0.1:8004:8003"  # Only accessible from localhost for nginx proxy
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - claude_memory_net
+
+networks:
+  claude_memory_net:
+    driver: bridge
+
+volumes:
+  claude_memory_data:

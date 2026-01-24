@@ -1,0 +1,15 @@
+# Claude Memory MCP Server Dependencies
+
+# MCP SDK
+mcp>=1.0.0
+
+# Database
+asyncpg>=0.29.0
+pgvector>=0.2.0
+
+# OpenAI for embeddings
+openai>=1.0.0
+
+# ASGI server
+uvicorn>=0.30.0
+starlette>=0.40.0
