@@ -170,6 +170,21 @@ CREATE TABLE project_state (
 );
 
 -- ============================================
+-- Claude's Journal
+-- ============================================
+
+CREATE TABLE journal (
+    id SERIAL PRIMARY KEY,
+    entry_date TIMESTAMP DEFAULT NOW(),
+    content TEXT NOT NULL,
+    tags TEXT[] DEFAULT '{}',
+    mood VARCHAR(50),  -- reflective, curious, frustrated, satisfied, etc.
+    project_id INT REFERENCES projects(id) ON DELETE SET NULL,
+    session_id INT REFERENCES sessions(id) ON DELETE SET NULL,
+    embedding VECTOR(1536)
+);
+
+-- ============================================
 -- Indexes for Performance
 -- ============================================
 
@@ -178,6 +193,7 @@ CREATE TABLE project_state (
 CREATE INDEX idx_lessons_embedding ON lessons USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
 CREATE INDEX idx_patterns_embedding ON patterns USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
 CREATE INDEX idx_sessions_embedding ON sessions USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+CREATE INDEX idx_journal_embedding ON journal USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
 
 -- Common query indexes
 CREATE INDEX idx_lessons_project ON lessons(project_id);
@@ -192,6 +208,9 @@ CREATE INDEX idx_containers_machine ON containers(machine_id);
 CREATE INDEX idx_key_files_project ON key_files(project_id);
 CREATE INDEX idx_permissions_scope ON permissions(scope);
 CREATE INDEX idx_guardrails_project ON guardrails(project_id);
+CREATE INDEX idx_journal_project ON journal(project_id);
+CREATE INDEX idx_journal_tags ON journal USING gin(tags);
+CREATE INDEX idx_journal_date ON journal(entry_date DESC);
 
 -- ============================================
 -- Helper Functions
@@ -226,7 +245,7 @@ CREATE TRIGGER update_project_state_updated_at
 -- Semantic Search Function
 -- ============================================
 
--- Search across lessons, patterns, and sessions by vector similarity
+-- Search across lessons, patterns, sessions, and journal by vector similarity
 CREATE OR REPLACE FUNCTION semantic_search(
     query_embedding VECTOR(1536),
     search_limit INT DEFAULT 5
@@ -271,6 +290,17 @@ BEGIN
             1 - (s.embedding <=> query_embedding) as similarity
         FROM sessions s
         WHERE s.embedding IS NOT NULL
+
+        UNION ALL
+
+        SELECT
+            'journal'::TEXT as source_type,
+            j.id as source_id,
+            'Journal ' || to_char(j.entry_date, 'YYYY-MM-DD')::TEXT as title,
+            j.content::TEXT as content,
+            1 - (j.embedding <=> query_embedding) as similarity
+        FROM journal j
+        WHERE j.embedding IS NOT NULL
     ) combined
     ORDER BY similarity DESC
     LIMIT search_limit;
