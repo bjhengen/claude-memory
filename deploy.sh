@@ -4,7 +4,7 @@
 set -e
 
 # Configuration
-EC2_HOST="ubuntu@<YOUR_EC2_IP>"
+EC2_HOST="ubuntu@44.212.169.119"
 SSH_KEY="~/.ssh/AWS_FR.pem"
 REMOTE_DIR="/home/ubuntu/claude-memory"
 

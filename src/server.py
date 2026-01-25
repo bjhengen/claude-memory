@@ -7,6 +7,7 @@ Provides structured storage and semantic search across lessons, patterns, and pr
 
 import os
 import json
+import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import AsyncIterator, Optional
@@ -18,6 +19,10 @@ from mcp.server.fastmcp import FastMCP, Context
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Configuration from environment
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://claude:claude@localhost:5432/claude_memory")
@@ -47,7 +52,19 @@ class APIKeyAuthMiddleware(BaseHTTPMiddleware):
                 content={"error": "Invalid or missing API key"}
             )
 
-        return await call_next(request)
+        try:
+            response = await call_next(request)
+            return response
+        except Exception as e:
+            # Log errors but don't expose internal details
+            error_type = type(e).__name__
+            if "BrokenResourceError" in error_type or "ClosedResourceError" in error_type:
+                # These are expected from client disconnects - log at debug level
+                logger.debug(f"Client connection issue: {error_type}")
+            else:
+                logger.error(f"Request error: {error_type}: {str(e)}")
+            # Let the error propagate to be handled by FastMCP
+            raise
 
 
 @dataclass
@@ -1122,19 +1139,55 @@ async def get_permissions(scope: str = "global", ctx: Context = None) -> str:
 
 import contextlib
 from starlette.applications import Starlette
-from starlette.routing import Mount
+from starlette.routing import Mount, Route
+from starlette.responses import JSONResponse, PlainTextResponse
+
+
+async def health_check(request):
+    """Health check endpoint for monitoring."""
+    try:
+        # Quick DB connection check if pool exists
+        if hasattr(request.app.state, "db_pool") and request.app.state.db_pool:
+            await request.app.state.db_pool.fetchval("SELECT 1")
+            return JSONResponse({
+                "status": "healthy",
+                "service": "claude-memory",
+                "database": "connected"
+            })
+        else:
+            return JSONResponse({"status": "healthy", "service": "claude-memory"})
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return JSONResponse(
+            {"status": "unhealthy", "error": str(e)},
+            status_code=503
+        )
+
+
+async def ready_check(request):
+    """Readiness check endpoint."""
+    return PlainTextResponse("ready")
 
 
 @contextlib.asynccontextmanager
 async def lifespan(app: Starlette):
-    """Manage MCP server lifespan."""
-    async with mcp.session_manager.run():
-        yield
+    """Manage MCP server lifespan and database connection."""
+    # Create database pool for health checks
+    pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
+    app.state.db_pool = pool
+
+    try:
+        async with mcp.session_manager.run():
+            yield
+    finally:
+        await pool.close()
 
 
 # Create Starlette app with proper lifespan management
 app = Starlette(
     routes=[
+        Route("/health", health_check),
+        Route("/ready", ready_check),
         Mount("/", mcp.streamable_http_app()),
     ],
     lifespan=lifespan
@@ -1145,4 +1198,12 @@ app.add_middleware(APIKeyAuthMiddleware)
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("src.server:app", host="0.0.0.0", port=8003, reload=False)
+    # Suppress access logs for health checks to reduce noise
+    uvicorn.run(
+        "src.server:app",
+        host="0.0.0.0",
+        port=8003,
+        reload=False,
+        log_level="info",
+        access_log=True
+    )
