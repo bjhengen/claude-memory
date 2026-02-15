@@ -1,4 +1,4 @@
-"""Lesson tools: log_lesson, log_pattern."""
+"""Lesson tools: log_lesson, log_pattern, update_lesson, retire_lesson."""
 
 import json
 
@@ -6,6 +6,7 @@ from mcp.server.fastmcp import Context
 
 from src.server import mcp
 from src.db import get_embedding, format_embedding
+from src.helpers import resolve_project_id
 
 
 @mcp.tool()
@@ -121,4 +122,106 @@ async def log_pattern(
         "success": True,
         "pattern_id": row["id"],
         "message": f"Pattern '{name}' saved successfully"
+    })
+
+
+@mcp.tool()
+async def update_lesson(
+    lesson_id: int,
+    title: str = None,
+    content: str = None,
+    tags: list[str] = None,
+    severity: str = None,
+    ctx: Context = None
+) -> str:
+    """
+    Update an existing lesson. Only provided fields are changed.
+    Regenerates embedding if title or content changes.
+
+    Args:
+        lesson_id: ID of the lesson to update
+        title: New title (optional)
+        content: New content (optional)
+        tags: New tags (optional)
+        severity: New severity (optional)
+    """
+    app = ctx.request_context.lifespan_context
+
+    existing = await app.db.fetchrow("SELECT * FROM lessons WHERE id = $1", lesson_id)
+    if not existing:
+        return json.dumps({"error": f"Lesson {lesson_id} not found"})
+
+    updates = []
+    params = []
+    param_idx = 1
+
+    if title is not None:
+        updates.append(f"title = ${param_idx}")
+        params.append(title)
+        param_idx += 1
+
+    if content is not None:
+        updates.append(f"content = ${param_idx}")
+        params.append(content)
+        param_idx += 1
+
+    if tags is not None:
+        updates.append(f"tags = ${param_idx}")
+        params.append(tags)
+        param_idx += 1
+
+    if severity is not None:
+        updates.append(f"severity = ${param_idx}")
+        params.append(severity)
+        param_idx += 1
+
+    if not updates:
+        return json.dumps({"error": "No updates provided"})
+
+    # Regenerate embedding if title or content changed
+    if title is not None or content is not None:
+        new_title = title if title is not None else existing["title"]
+        new_content = content if content is not None else existing["content"]
+        embedding = await get_embedding(app.openai, f"{new_title}\n{new_content}")
+        embedding_str = format_embedding(embedding)
+        updates.append(f"embedding = ${param_idx}::vector")
+        params.append(embedding_str)
+        param_idx += 1
+
+    params.append(lesson_id)
+    await app.db.execute(
+        f"UPDATE lessons SET {', '.join(updates)} WHERE id = ${param_idx}",
+        *params
+    )
+
+    return json.dumps({"success": True, "message": f"Lesson {lesson_id} updated"})
+
+
+@mcp.tool()
+async def retire_lesson(
+    lesson_id: int,
+    reason: str = None,
+    ctx: Context = None
+) -> str:
+    """
+    Retire a lesson (soft delete). Retired lessons are excluded from search by default.
+
+    Args:
+        lesson_id: ID of the lesson to retire
+        reason: Why this lesson is being retired (optional)
+    """
+    app = ctx.request_context.lifespan_context
+
+    existing = await app.db.fetchrow("SELECT id, title FROM lessons WHERE id = $1", lesson_id)
+    if not existing:
+        return json.dumps({"error": f"Lesson {lesson_id} not found"})
+
+    await app.db.execute(
+        "UPDATE lessons SET retired_at = NOW(), retired_reason = $1 WHERE id = $2",
+        reason, lesson_id
+    )
+
+    return json.dumps({
+        "success": True,
+        "message": f"Lesson {lesson_id} ('{existing['title']}') retired"
     })

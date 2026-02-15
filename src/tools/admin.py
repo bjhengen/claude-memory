@@ -198,3 +198,93 @@ async def get_permissions(scope: str = "global", ctx: Context = None) -> str:
     ]
 
     return json.dumps({"permissions": permissions})
+
+
+@mcp.tool()
+async def merge_projects(
+    keep: str,
+    merge: str,
+    ctx: Context = None
+) -> str:
+    """
+    Merge one project into another. Reassigns all associated data
+    (lessons, sessions, journal entries, key_files, approaches, state)
+    from the merge project to the keep project. Creates an alias so
+    the old name still resolves. Deletes the merge project record.
+
+    Args:
+        keep: Project name to keep (canonical)
+        merge: Project name to merge into keep (will be deleted)
+    """
+    app = ctx.request_context.lifespan_context
+
+    keep_row = await app.db.fetchrow(
+        "SELECT id, name FROM projects WHERE LOWER(name) = LOWER($1)", keep
+    )
+    merge_row = await app.db.fetchrow(
+        "SELECT id, name FROM projects WHERE LOWER(name) = LOWER($1)", merge
+    )
+
+    if not keep_row:
+        return json.dumps({"error": f"Keep project '{keep}' not found"})
+    if not merge_row:
+        return json.dumps({"error": f"Merge project '{merge}' not found"})
+    if keep_row["id"] == merge_row["id"]:
+        return json.dumps({"error": "Cannot merge a project into itself"})
+
+    keep_id = keep_row["id"]
+    merge_id = merge_row["id"]
+    moved = {}
+
+    # Reassign lessons
+    result = await app.db.execute(
+        "UPDATE lessons SET project_id = $1 WHERE project_id = $2", keep_id, merge_id
+    )
+    moved["lessons"] = int(result.split()[-1])
+
+    # Reassign sessions
+    result = await app.db.execute(
+        "UPDATE sessions SET project_id = $1 WHERE project_id = $2", keep_id, merge_id
+    )
+    moved["sessions"] = int(result.split()[-1])
+
+    # Reassign journal entries
+    result = await app.db.execute(
+        "UPDATE journal SET project_id = $1 WHERE project_id = $2", keep_id, merge_id
+    )
+    moved["journal_entries"] = int(result.split()[-1])
+
+    # Reassign key_files
+    result = await app.db.execute(
+        "UPDATE key_files SET project_id = $1 WHERE project_id = $2", keep_id, merge_id
+    )
+    moved["key_files"] = int(result.split()[-1])
+
+    # Reassign approaches
+    result = await app.db.execute(
+        "UPDATE approaches SET project_id = $1 WHERE project_id = $2", keep_id, merge_id
+    )
+    moved["approaches"] = int(result.split()[-1])
+
+    # Delete merge project's state (keep project's state wins)
+    await app.db.execute("DELETE FROM project_state WHERE project_id = $1", merge_id)
+
+    # Create alias for old name
+    await app.db.execute(
+        """
+        INSERT INTO project_aliases (alias, project_id)
+        VALUES ($1, $2)
+        ON CONFLICT (alias) DO NOTHING
+        """,
+        merge_row["name"], keep_id
+    )
+
+    # Delete merge project
+    await app.db.execute("DELETE FROM projects WHERE id = $1", merge_id)
+
+    return json.dumps({
+        "success": True,
+        "message": f"Merged '{merge_row['name']}' into '{keep_row['name']}'",
+        "moved": moved,
+        "alias_created": merge_row["name"]
+    })

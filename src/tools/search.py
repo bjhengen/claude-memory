@@ -53,6 +53,7 @@ async def search_lessons(
     tags: list[str] = None,
     severity: str = None,
     limit: int = 10,
+    include_retired: bool = False,
     ctx: Context = None
 ) -> str:
     """
@@ -64,6 +65,7 @@ async def search_lessons(
         tags: Filter by tags (optional)
         severity: Filter by severity: critical, important, tip (optional)
         limit: Maximum results
+        include_retired: Include retired lessons (default False)
     """
     app = ctx.request_context.lifespan_context
 
@@ -93,6 +95,9 @@ async def search_lessons(
         conditions.append(f"l.tags && ${param_idx}")
         params.append(tags)
         param_idx += 1
+
+    if not include_retired:
+        conditions.append("l.retired_at IS NULL")
 
     where_clause = " AND ".join(conditions) if conditions else "1=1"
 

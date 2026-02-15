@@ -1,9 +1,11 @@
 """Project tools: get_project, list_projects."""
 
 import json
+import re
 
 from mcp.server.fastmcp import Context
 
+from src.helpers import resolve_project_id
 from src.server import mcp
 
 
@@ -136,3 +138,104 @@ async def list_projects(status: str = None, ctx: Context = None) -> str:
     ]
 
     return json.dumps({"projects": projects})
+
+
+@mcp.tool()
+async def get_project_claude_md(project: str, ctx: Context = None) -> str:
+    """
+    Get the CLAUDE.md content for a project.
+    Returns the project's philosophy, scope, conventions, and active context.
+
+    Args:
+        project: Project name
+    """
+    app = ctx.request_context.lifespan_context
+    project_id = await resolve_project_id(app.db, project)
+    if not project_id:
+        return json.dumps({"error": f"Project '{project}' not found"})
+
+    row = await app.db.fetchrow(
+        "SELECT name, claude_md FROM projects WHERE id = $1",
+        project_id
+    )
+
+    return json.dumps({
+        "project": row["name"],
+        "claude_md": row["claude_md"],
+        "has_claude_md": row["claude_md"] is not None
+    })
+
+
+@mcp.tool()
+async def set_project_claude_md(project: str, content: str, ctx: Context = None) -> str:
+    """
+    Create or fully replace the CLAUDE.md content for a project.
+
+    Args:
+        project: Project name
+        content: Full CLAUDE.md content (markdown)
+    """
+    app = ctx.request_context.lifespan_context
+    project_id = await resolve_project_id(app.db, project)
+    if not project_id:
+        return json.dumps({"error": f"Project '{project}' not found"})
+
+    await app.db.execute(
+        "UPDATE projects SET claude_md = $1, updated_at = NOW() WHERE id = $2",
+        content, project_id
+    )
+
+    return json.dumps({"success": True, "message": f"CLAUDE.md set for {project}"})
+
+
+@mcp.tool()
+async def update_project_claude_md(
+    project: str,
+    section: str,
+    content: str,
+    ctx: Context = None
+) -> str:
+    """
+    Update a specific section of a project's CLAUDE.md by heading match.
+    If the section exists, replaces it. If not, appends it.
+
+    Args:
+        project: Project name
+        section: Section heading to find/replace (e.g., "## Architecture")
+        content: New content for this section (include the heading)
+    """
+    app = ctx.request_context.lifespan_context
+    project_id = await resolve_project_id(app.db, project)
+    if not project_id:
+        return json.dumps({"error": f"Project '{project}' not found"})
+
+    row = await app.db.fetchrow(
+        "SELECT claude_md FROM projects WHERE id = $1",
+        project_id
+    )
+
+    existing = row["claude_md"] or ""
+
+    heading_match = re.match(r'^(#{1,6})\s', section)
+    if not heading_match:
+        return json.dumps({"error": "Section must start with a markdown heading (e.g., '## Architecture')"})
+
+    level = len(heading_match.group(1))
+    pattern = re.compile(
+        rf'^{re.escape(section)}.*?(?=^#{{1,{level}}}\s|\Z)',
+        re.MULTILINE | re.DOTALL
+    )
+
+    if pattern.search(existing):
+        updated = pattern.sub(content.rstrip() + '\n\n', existing, count=1)
+        action = "updated"
+    else:
+        updated = existing.rstrip() + '\n\n' + content.rstrip() + '\n'
+        action = "appended"
+
+    await app.db.execute(
+        "UPDATE projects SET claude_md = $1, updated_at = NOW() WHERE id = $2",
+        updated, project_id
+    )
+
+    return json.dumps({"success": True, "message": f"Section '{section}' {action} in CLAUDE.md for {project}"})
