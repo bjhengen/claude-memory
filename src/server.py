@@ -8,6 +8,8 @@ Provides structured storage and semantic search across lessons, patterns, and pr
 import os
 import json
 import logging
+import secrets
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import AsyncIterator, Optional
@@ -17,8 +19,19 @@ import asyncpg
 from openai import AsyncOpenAI
 from mcp.server.fastmcp import FastMCP, Context
 from mcp.server.transport_security import TransportSecuritySettings
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import JSONResponse
+from mcp.server.auth.provider import (
+    OAuthAuthorizationServerProvider,
+    AuthorizationParams,
+    AuthorizationCode,
+    RefreshToken,
+    AccessToken,
+    TokenError,
+    construct_redirect_uri,
+)
+from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
+from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+from starlette.requests import Request
+from starlette.responses import JSONResponse, PlainTextResponse, HTMLResponse, RedirectResponse
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -27,45 +40,185 @@ logger = logging.getLogger(__name__)
 # Configuration from environment
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://claude:claude@localhost:5432/claude_memory")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-API_KEY = os.getenv("CLAUDE_MEMORY_API_KEY", "dev-key")  # For authentication
+API_KEY = os.getenv("CLAUDE_MEMORY_API_KEY", "dev-key")  # For backward-compatible API key auth
+ISSUER_URL = os.getenv("OAUTH_ISSUER_URL", "https://memory.friendly-robots.com")
 
 
-class APIKeyAuthMiddleware(BaseHTTPMiddleware):
-    """Middleware to validate API key on all requests."""
+# ============================================
+# OAuth Provider (In-Memory)
+# ============================================
 
-    async def dispatch(self, request, call_next):
-        # Allow health checks without auth
-        if request.url.path in ["/health", "/ready"]:
-            return await call_next(request)
+class MemoryOAuthProvider:
+    """
+    In-memory OAuth 2.0 provider for the Claude Memory MCP server.
 
-        # Check for API key in header
-        auth_header = request.headers.get("Authorization", "")
-        if auth_header.startswith("Bearer "):
-            provided_key = auth_header[7:]
-        else:
-            # Also check X-API-Key header
-            provided_key = request.headers.get("X-API-Key", "")
+    Supports dynamic client registration, authorization code flow with PKCE,
+    and backward-compatible API key authentication.
+    """
 
-        if not provided_key or provided_key != API_KEY:
-            return JSONResponse(
-                status_code=401,
-                content={"error": "Invalid or missing API key"}
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self._clients: dict[str, OAuthClientInformationFull] = {}
+        self._auth_codes: dict[str, AuthorizationCode] = {}
+        self._access_tokens: dict[str, AccessToken] = {}
+        self._refresh_tokens: dict[str, RefreshToken] = {}
+        self._pending_auth: dict[str, dict] = {}
+
+    async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
+        return self._clients.get(client_id)
+
+    async def register_client(self, client_info: OAuthClientInformationFull) -> None:
+        client_info.client_id = f"client_{secrets.token_hex(16)}"
+        client_info.client_secret = secrets.token_hex(32)
+        client_info.client_id_issued_at = int(time.time())
+
+        if client_info.token_endpoint_auth_method is None:
+            client_info.token_endpoint_auth_method = "client_secret_post"
+
+        self._clients[client_info.client_id] = client_info
+        logger.info(f"Registered OAuth client: {client_info.client_id} ({client_info.client_name or 'unnamed'})")
+
+    async def authorize(
+        self, client: OAuthClientInformationFull, params: AuthorizationParams
+    ) -> str:
+        request_id = secrets.token_hex(16)
+        self._pending_auth[request_id] = {
+            "client": client,
+            "params": params,
+            "created_at": time.time(),
+        }
+        return f"{ISSUER_URL}/approve?id={request_id}"
+
+    async def approve_authorization(self, request_id: str) -> str:
+        """Process an approved authorization and return redirect URL with auth code."""
+        pending = self._pending_auth.pop(request_id, None)
+        if not pending:
+            raise ValueError("Invalid or expired authorization request")
+
+        if time.time() - pending["created_at"] > 600:
+            raise ValueError("Authorization request has expired")
+
+        client = pending["client"]
+        params: AuthorizationParams = pending["params"]
+
+        code = secrets.token_hex(32)
+        auth_code = AuthorizationCode(
+            code=code,
+            scopes=params.scopes or [],
+            expires_at=time.time() + 300,
+            client_id=client.client_id,
+            code_challenge=params.code_challenge,
+            redirect_uri=params.redirect_uri,
+            redirect_uri_provided_explicitly=params.redirect_uri_provided_explicitly,
+            resource=params.resource,
+        )
+        self._auth_codes[code] = auth_code
+
+        redirect_params = {"code": code}
+        if params.state:
+            redirect_params["state"] = params.state
+
+        return construct_redirect_uri(str(params.redirect_uri), **redirect_params)
+
+    async def load_authorization_code(
+        self, client: OAuthClientInformationFull, authorization_code: str
+    ) -> AuthorizationCode | None:
+        return self._auth_codes.get(authorization_code)
+
+    async def exchange_authorization_code(
+        self, client: OAuthClientInformationFull, authorization_code: AuthorizationCode
+    ) -> OAuthToken:
+        self._auth_codes.pop(authorization_code.code, None)
+
+        access_token_str = secrets.token_hex(32)
+        self._access_tokens[access_token_str] = AccessToken(
+            token=access_token_str,
+            client_id=client.client_id,
+            scopes=authorization_code.scopes,
+            expires_at=int(time.time()) + 86400 * 30,
+            resource=authorization_code.resource,
+        )
+
+        refresh_token_str = secrets.token_hex(32)
+        self._refresh_tokens[refresh_token_str] = RefreshToken(
+            token=refresh_token_str,
+            client_id=client.client_id,
+            scopes=authorization_code.scopes,
+            expires_at=int(time.time()) + 86400 * 365,
+        )
+
+        return OAuthToken(
+            access_token=access_token_str,
+            token_type="Bearer",
+            expires_in=86400 * 30,
+            refresh_token=refresh_token_str,
+            scope=" ".join(authorization_code.scopes) if authorization_code.scopes else None,
+        )
+
+    async def load_refresh_token(
+        self, client: OAuthClientInformationFull, refresh_token: str
+    ) -> RefreshToken | None:
+        return self._refresh_tokens.get(refresh_token)
+
+    async def exchange_refresh_token(
+        self,
+        client: OAuthClientInformationFull,
+        refresh_token: RefreshToken,
+        scopes: list[str],
+    ) -> OAuthToken:
+        self._refresh_tokens.pop(refresh_token.token, None)
+
+        access_token_str = secrets.token_hex(32)
+        self._access_tokens[access_token_str] = AccessToken(
+            token=access_token_str,
+            client_id=client.client_id,
+            scopes=scopes,
+            expires_at=int(time.time()) + 86400 * 30,
+        )
+
+        new_refresh_str = secrets.token_hex(32)
+        self._refresh_tokens[new_refresh_str] = RefreshToken(
+            token=new_refresh_str,
+            client_id=client.client_id,
+            scopes=scopes,
+            expires_at=int(time.time()) + 86400 * 365,
+        )
+
+        return OAuthToken(
+            access_token=access_token_str,
+            token_type="Bearer",
+            expires_in=86400 * 30,
+            refresh_token=new_refresh_str,
+            scope=" ".join(scopes) if scopes else None,
+        )
+
+    async def load_access_token(self, token: str) -> AccessToken | None:
+        # Check OAuth-issued access tokens
+        access_token = self._access_tokens.get(token)
+        if access_token:
+            return access_token
+
+        # Backward compatibility: accept the raw API key as a bearer token
+        if token == self.api_key:
+            return AccessToken(
+                token=token,
+                client_id="api-key-user",
+                scopes=[],
+                expires_at=None,
             )
 
-        try:
-            response = await call_next(request)
-            return response
-        except Exception as e:
-            # Log errors but don't expose internal details
-            error_type = type(e).__name__
-            if "BrokenResourceError" in error_type or "ClosedResourceError" in error_type:
-                # These are expected from client disconnects - log at debug level
-                logger.debug(f"Client connection issue: {error_type}")
-            else:
-                logger.error(f"Request error: {error_type}: {str(e)}")
-            # Let the error propagate to be handled by FastMCP
-            raise
+        return None
 
+    async def revoke_token(self, token: AccessToken | RefreshToken) -> None:
+        if isinstance(token, AccessToken):
+            self._access_tokens.pop(token.token, None)
+        elif isinstance(token, RefreshToken):
+            self._refresh_tokens.pop(token.token, None)
+
+
+# ============================================
+# Application Setup
+# ============================================
 
 @dataclass
 class AppContext:
@@ -99,14 +252,111 @@ security_settings = TransportSecuritySettings(
     ]
 )
 
-# Create the MCP server
+# Create OAuth provider
+oauth_provider = MemoryOAuthProvider(API_KEY)
+
+# Configure OAuth auth settings
+auth_settings = AuthSettings(
+    issuer_url=ISSUER_URL,
+    resource_server_url=f"{ISSUER_URL}/mcp",
+    client_registration_options=ClientRegistrationOptions(
+        enabled=True,
+    ),
+    revocation_options=RevocationOptions(enabled=True),
+)
+
+# Create the MCP server with OAuth
 mcp = FastMCP(
     "Claude Memory",
     lifespan=app_lifespan,
     stateless_http=True,
     json_response=True,
-    transport_security=security_settings
+    transport_security=security_settings,
+    auth=auth_settings,
+    auth_server_provider=oauth_provider,
 )
+
+
+# ============================================
+# Custom Routes (no auth required)
+# ============================================
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health_check(request: Request) -> JSONResponse:
+    """Health check endpoint for monitoring."""
+    return JSONResponse({"status": "healthy", "service": "claude-memory"})
+
+
+@mcp.custom_route("/ready", methods=["GET"])
+async def ready_check(request: Request) -> PlainTextResponse:
+    """Readiness check endpoint."""
+    return PlainTextResponse("ready")
+
+
+@mcp.custom_route("/approve", methods=["GET", "POST"])
+async def approve_authorization(request: Request):
+    """OAuth authorization approval page."""
+    if request.method == "GET":
+        request_id = request.query_params.get("id")
+        if not request_id or request_id not in oauth_provider._pending_auth:
+            return HTMLResponse(
+                "<h1>Invalid or expired authorization request</h1>",
+                status_code=400,
+            )
+
+        html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>Authorize - Claude Memory</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            display: flex; justify-content: center; align-items: center;
+            min-height: 100vh; margin: 0; background: #f0f2f5;
+        }}
+        .card {{
+            background: white; padding: 2.5rem; border-radius: 16px;
+            box-shadow: 0 4px 24px rgba(0,0,0,0.08); max-width: 420px;
+            text-align: center; width: 90%;
+        }}
+        .icon {{ font-size: 3rem; margin-bottom: 1rem; }}
+        h1 {{ font-size: 1.4rem; margin: 0 0 0.5rem; color: #1a1a2e; }}
+        p {{ color: #555; line-height: 1.5; margin: 0.5rem 0 1.5rem; }}
+        button {{
+            background: #6366f1; color: white; border: none;
+            padding: 14px 32px; border-radius: 10px; font-size: 1rem;
+            cursor: pointer; width: 100%; font-weight: 600;
+            transition: background 0.2s;
+        }}
+        button:hover {{ background: #4f46e5; }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="icon">&#129302;</div>
+        <h1>Claude Memory</h1>
+        <p>An application is requesting access to your memory server.</p>
+        <form method="POST">
+            <input type="hidden" name="id" value="{request_id}">
+            <button type="submit">Authorize Access</button>
+        </form>
+    </div>
+</body>
+</html>"""
+        return HTMLResponse(html)
+
+    else:  # POST
+        form = await request.form()
+        request_id = form.get("id")
+        if not request_id:
+            return HTMLResponse("<h1>Missing request ID</h1>", status_code=400)
+
+        try:
+            redirect_url = await oauth_provider.approve_authorization(str(request_id))
+            return RedirectResponse(url=redirect_url, status_code=302)
+        except ValueError as e:
+            return HTMLResponse(f"<h1>{str(e)}</h1>", status_code=400)
 
 
 # ============================================
@@ -1137,68 +1387,10 @@ async def get_permissions(scope: str = "global", ctx: Context = None) -> str:
 # ASGI App for uvicorn
 # ============================================
 
-import contextlib
-from starlette.applications import Starlette
-from starlette.routing import Mount, Route
-from starlette.responses import JSONResponse, PlainTextResponse
-
-
-async def health_check(request):
-    """Health check endpoint for monitoring."""
-    try:
-        # Quick DB connection check if pool exists
-        if hasattr(request.app.state, "db_pool") and request.app.state.db_pool:
-            await request.app.state.db_pool.fetchval("SELECT 1")
-            return JSONResponse({
-                "status": "healthy",
-                "service": "claude-memory",
-                "database": "connected"
-            })
-        else:
-            return JSONResponse({"status": "healthy", "service": "claude-memory"})
-    except Exception as e:
-        logger.error(f"Health check failed: {e}")
-        return JSONResponse(
-            {"status": "unhealthy", "error": str(e)},
-            status_code=503
-        )
-
-
-async def ready_check(request):
-    """Readiness check endpoint."""
-    return PlainTextResponse("ready")
-
-
-@contextlib.asynccontextmanager
-async def lifespan(app: Starlette):
-    """Manage MCP server lifespan and database connection."""
-    # Create database pool for health checks
-    pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
-    app.state.db_pool = pool
-
-    try:
-        async with mcp.session_manager.run():
-            yield
-    finally:
-        await pool.close()
-
-
-# Create Starlette app with proper lifespan management
-app = Starlette(
-    routes=[
-        Route("/health", health_check),
-        Route("/ready", ready_check),
-        Mount("/", mcp.streamable_http_app()),
-    ],
-    lifespan=lifespan
-)
-
-# Add API key authentication middleware
-app.add_middleware(APIKeyAuthMiddleware)
+app = mcp.streamable_http_app()
 
 if __name__ == "__main__":
     import uvicorn
-    # Suppress access logs for health checks to reduce noise
     uvicorn.run(
         "src.server:app",
         host="0.0.0.0",
