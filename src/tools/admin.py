@@ -5,6 +5,7 @@ import json
 from mcp.server.fastmcp import Context
 
 from src.server import mcp
+from src.helpers import resolve_project_id
 
 
 @mcp.tool()
@@ -27,11 +28,9 @@ async def update_project_state(
     app = ctx.request_context.lifespan_context
 
     # Get project ID
-    project_row = await app.db.fetchrow("SELECT id FROM projects WHERE name = $1", project)
-    if not project_row:
+    project_id = await resolve_project_id(app.db, project)
+    if not project_id:
         return json.dumps({"error": f"Project '{project}' not found"})
-
-    project_id = project_row["id"]
 
     # Build update
     updates = []
@@ -89,8 +88,7 @@ async def check_guardrails(
     app = ctx.request_context.lifespan_context
 
     # Get project ID
-    project_row = await app.db.fetchrow("SELECT id FROM projects WHERE name = $1", project)
-    project_id = project_row["id"] if project_row else None
+    project_id = await resolve_project_id(app.db, project)
 
     # Get applicable guardrails
     guardrails = await app.db.fetch(

@@ -19,21 +19,21 @@ async def get_project(name: str, ctx: Context = None) -> str:
     """
     app = ctx.request_context.lifespan_context
 
+    # Resolve project ID (case-insensitive, alias-aware)
+    project_id = await resolve_project_id(app.db, name)
+    if not project_id:
+        return json.dumps({"error": f"Project '{name}' not found"})
+
     # Get project
     project = await app.db.fetchrow(
         """
         SELECT p.*, m.name as machine_name, m.ssh_command
         FROM projects p
         LEFT JOIN machines m ON p.machine_id = m.id
-        WHERE p.name = $1
+        WHERE p.id = $1
         """,
-        name
+        project_id
     )
-
-    if not project:
-        return json.dumps({"error": f"Project '{name}' not found"})
-
-    project_id = project["id"]
 
     # Get current approaches
     approaches = await app.db.fetch(

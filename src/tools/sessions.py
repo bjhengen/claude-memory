@@ -6,6 +6,7 @@ from mcp.server.fastmcp import Context
 
 from src.server import mcp
 from src.db import get_embedding, format_embedding
+from src.helpers import resolve_project_id
 
 
 @mcp.tool()
@@ -30,9 +31,7 @@ async def start_session(
     # Get project ID
     project_id = None
     if project:
-        project_row = await app.db.fetchrow("SELECT id FROM projects WHERE name = $1", project)
-        if project_row:
-            project_id = project_row["id"]
+        project_id = await resolve_project_id(app.db, project)
 
     row = await app.db.fetchrow(
         """

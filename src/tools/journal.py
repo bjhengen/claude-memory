@@ -6,6 +6,7 @@ from mcp.server.fastmcp import Context
 
 from src.server import mcp
 from src.db import get_embedding, format_embedding
+from src.helpers import resolve_project_id
 
 
 @mcp.tool()
@@ -31,9 +32,7 @@ async def write_journal(
     # Get project ID if specified
     project_id = None
     if project:
-        row = await app.db.fetchrow("SELECT id FROM projects WHERE name = $1", project)
-        if row:
-            project_id = row["id"]
+        project_id = await resolve_project_id(app.db, project)
 
     # Generate embedding for searchability
     embedding = await get_embedding(app.openai, content)
@@ -87,9 +86,11 @@ async def read_journal(
         param_idx = 1
 
     if project:
-        conditions.append(f"p.name = ${param_idx}")
-        params.append(project)
-        param_idx += 1
+        project_id = await resolve_project_id(app.db, project)
+        if project_id:
+            conditions.append(f"j.project_id = ${param_idx}")
+            params.append(project_id)
+            param_idx += 1
 
     if tags:
         conditions.append(f"j.tags && ${param_idx}")

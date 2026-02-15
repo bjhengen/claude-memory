@@ -45,9 +45,7 @@ async def log_lesson(
     # Get project ID if specified
     project_id = None
     if project:
-        row = await app.db.fetchrow("SELECT id FROM projects WHERE name = $1", project)
-        if row:
-            project_id = row["id"]
+        project_id = await resolve_project_id(app.db, project)
 
     # Generate embedding
     embedding_text = f"{title}\n{content}"
