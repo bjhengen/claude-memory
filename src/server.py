@@ -166,6 +166,7 @@ import src.tools.lessons     # noqa: E402, F401
 import src.tools.sessions    # noqa: E402, F401
 import src.tools.journal     # noqa: E402, F401
 import src.tools.admin       # noqa: E402, F401
+import src.tools.agents      # noqa: E402, F401
 
 
 # ============================================
