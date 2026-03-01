@@ -1,4 +1,4 @@
-"""Search tools: search, search_lessons."""
+"""Search tools: search, search_lessons, find_context."""
 
 import json
 
@@ -6,6 +6,7 @@ from mcp.server.fastmcp import Context
 
 from src.server import mcp
 from src.db import get_embedding, format_embedding
+from src.helpers import resolve_project_id
 
 
 @mcp.tool()
@@ -139,3 +140,215 @@ async def search_lessons(
         })
 
     return json.dumps({"lessons": results})
+
+
+@mcp.tool()
+async def find_context(
+    query: str,
+    project: str = None,
+    tiers: list[str] = None,
+    limit_per_tier: int = 3,
+    ctx: Context = None
+) -> str:
+    """
+    Unified tiered retrieval. Searches across agents, specifications, lessons,
+    and MCP tools in one call. Use this to orient yourself on a task.
+
+    Args:
+        query: Natural language task description
+        project: Scope to a project
+        tiers: Which tiers to search: ['agents', 'specs', 'lessons', 'mcp_tools']. Defaults to all.
+        limit_per_tier: Max results per tier (default 3)
+    """
+    app = ctx.request_context.lifespan_context
+
+    # Generate a single embedding for all tier searches
+    embedding = await get_embedding(app.openai, query)
+    embedding_str = format_embedding(embedding)
+
+    # Resolve project if provided
+    project_id = None
+    if project:
+        project_id = await resolve_project_id(app.db, project)
+
+    active_tiers = tiers or ["agents", "specs", "lessons", "mcp_tools"]
+    result = {"query": query}
+
+    # --- Agents tier ---
+    if "agents" in active_tiers:
+        agent_conditions = ["a.embedding IS NOT NULL", "a.retired_at IS NULL"]
+        agent_params = [embedding_str]
+        agent_idx = 2
+
+        if project_id:
+            agent_conditions.append(f"(a.project_id = ${agent_idx} OR a.project_id IS NULL)")
+            agent_params.append(project_id)
+            agent_idx += 1
+
+        agent_where = " AND ".join(agent_conditions)
+        agent_params.append(limit_per_tier)
+
+        rows = await app.db.fetch(
+            f"""
+            SELECT a.name, a.description, a.model, a.triggers,
+                   p.name as project_name,
+                   1 - (a.embedding <=> $1::vector) as similarity
+            FROM agent_specs a
+            LEFT JOIN projects p ON a.project_id = p.id
+            WHERE {agent_where}
+            ORDER BY similarity DESC
+            LIMIT ${agent_idx}
+            """,
+            *agent_params
+        )
+
+        # Add trigger keyword scoring
+        task_lower = query.lower()
+        agents = []
+        for row in rows:
+            matched = [t for t in (row["triggers"] or []) if t.lower() in task_lower]
+            semantic = float(row["similarity"])
+            trigger_bonus = min(len(matched), 3) / 3.0 * 0.4
+            combined = semantic * 0.6 + trigger_bonus
+            confidence = "high" if combined >= 0.7 else "medium" if combined >= 0.5 else "low"
+            agents.append({
+                "name": row["name"],
+                "description": row["description"],
+                "model": row["model"],
+                "project": row["project_name"],
+                "confidence": confidence,
+                "similarity": round(combined, 3),
+                "matched_triggers": matched
+            })
+        agents.sort(key=lambda x: x["similarity"], reverse=True)
+        result["agents"] = agents
+
+    # --- Specifications tier ---
+    if "specs" in active_tiers:
+        spec_conditions = ["s.embedding IS NOT NULL", "s.retired_at IS NULL"]
+        spec_params = [embedding_str]
+        spec_idx = 2
+
+        if project_id:
+            spec_conditions.append(f"s.project_id = ${spec_idx}")
+            spec_params.append(project_id)
+            spec_idx += 1
+
+        spec_where = " AND ".join(spec_conditions)
+        spec_params.append(limit_per_tier)
+
+        rows = await app.db.fetch(
+            f"""
+            SELECT s.id, s.title, s.subsystem, s.summary, s.format_hints,
+                   p.name as project_name,
+                   1 - (s.embedding <=> $1::vector) as similarity
+            FROM specifications s
+            LEFT JOIN projects p ON s.project_id = p.id
+            WHERE {spec_where}
+            ORDER BY similarity DESC
+            LIMIT ${spec_idx}
+            """,
+            *spec_params
+        )
+
+        result["specifications"] = [
+            {
+                "id": row["id"],
+                "title": row["title"],
+                "subsystem": row["subsystem"],
+                "summary": row["summary"],
+                "format_hints": row["format_hints"],
+                "project": row["project_name"],
+                "similarity": round(row["similarity"], 3)
+            }
+            for row in rows
+        ]
+
+    # --- Lessons tier ---
+    if "lessons" in active_tiers:
+        lesson_conditions = ["l.embedding IS NOT NULL", "l.retired_at IS NULL"]
+        lesson_params = [embedding_str]
+        lesson_idx = 2
+
+        if project_id:
+            lesson_conditions.append(f"l.project_id = ${lesson_idx}")
+            lesson_params.append(project_id)
+            lesson_idx += 1
+
+        lesson_where = " AND ".join(lesson_conditions)
+        lesson_params.append(limit_per_tier)
+
+        rows = await app.db.fetch(
+            f"""
+            SELECT l.id, l.title, l.content, l.tags, l.severity,
+                   p.name as project_name,
+                   1 - (l.embedding <=> $1::vector) as similarity
+            FROM lessons l
+            LEFT JOIN projects p ON l.project_id = p.id
+            WHERE {lesson_where}
+            ORDER BY similarity DESC
+            LIMIT ${lesson_idx}
+            """,
+            *lesson_params
+        )
+
+        result["lessons"] = [
+            {
+                "id": row["id"],
+                "title": row["title"],
+                "content": row["content"][:300] if row["content"] else None,
+                "tags": row["tags"],
+                "severity": row["severity"],
+                "project": row["project_name"],
+                "similarity": round(row["similarity"], 3)
+            }
+            for row in rows
+        ]
+
+    # --- MCP tools tier ---
+    if "mcp_tools" in active_tiers:
+        mcp_conditions = ["t.embedding IS NOT NULL", "s.retired_at IS NULL"]
+        mcp_params = [embedding_str]
+        mcp_idx = 2
+        mcp_joins = ""
+
+        if project_id:
+            mcp_joins = "JOIN mcp_server_projects sp ON s.id = sp.server_id"
+            mcp_conditions.append(f"sp.project_id = ${mcp_idx}")
+            mcp_params.append(project_id)
+            mcp_idx += 1
+
+        mcp_where = " AND ".join(mcp_conditions)
+        mcp_params.append(limit_per_tier)
+
+        rows = await app.db.fetch(
+            f"""
+            SELECT t.tool_name, t.description as tool_description,
+                   s.name as server_name, s.url, s.transport,
+                   m.name as machine_name,
+                   1 - (t.embedding <=> $1::vector) as similarity
+            FROM mcp_server_tools t
+            JOIN mcp_servers s ON t.server_id = s.id
+            LEFT JOIN machines m ON s.machine_id = m.id
+            {mcp_joins}
+            WHERE {mcp_where}
+            ORDER BY similarity DESC
+            LIMIT ${mcp_idx}
+            """,
+            *mcp_params
+        )
+
+        result["mcp_tools"] = [
+            {
+                "tool": row["tool_name"],
+                "description": row["tool_description"],
+                "server": row["server_name"],
+                "url": row["url"],
+                "transport": row["transport"],
+                "machine": row["machine_name"],
+                "similarity": round(row["similarity"], 3)
+            }
+            for row in rows
+        ]
+
+    return json.dumps(result)
