@@ -183,9 +183,12 @@ async def update_agent(
     if len(params) == 0:
         return json.dumps({"error": "No updates provided"})
 
-    # Regenerate embedding if summary changed
-    if summary is not None:
-        embedding = await get_embedding(app.openai, summary)
+    # Regenerate embedding if summary or description changed
+    if summary is not None or description is not None:
+        new_summary = summary if summary is not None else existing["summary"]
+        new_description = description if description is not None else existing["description"]
+        embed_text = new_summary or new_description
+        embedding = await get_embedding(app.openai, embed_text)
         embedding_str = format_embedding(embedding)
         updates.append(f"embedding = ${param_idx}::vector")
         params.append(embedding_str)

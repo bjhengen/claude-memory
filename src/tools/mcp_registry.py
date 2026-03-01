@@ -156,7 +156,7 @@ async def get_mcp_server(name: str, ctx: Context = None) -> str:
         "machine_ssh": row["machine_ssh"],
         "auth_type": row["auth_type"],
         "auth_hint": row["auth_hint"],
-        "config_snippet": json.loads(row["config_snippet"]) if row["config_snippet"] else None,
+        "config_snippet": row["config_snippet"],
         "limitations": row["limitations"],
         "status": row["status"],
         "retired": row["retired_at"] is not None,
@@ -164,7 +164,7 @@ async def get_mcp_server(name: str, ctx: Context = None) -> str:
             {
                 "name": t["tool_name"],
                 "description": t["description"],
-                "parameters": json.loads(t["parameters"]) if t["parameters"] else None
+                "parameters": t["parameters"]
             }
             for t in tools
         ],
@@ -521,7 +521,7 @@ async def find_mcp_tools(
         results.append({
             "tool": row["tool_name"],
             "tool_description": row["tool_description"],
-            "parameters": json.loads(row["parameters"]) if row["parameters"] else None,
+            "parameters": row["parameters"],
             "server": row["server_name"],
             "server_description": row["server_description"],
             "url": row["url"],

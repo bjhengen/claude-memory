@@ -355,6 +355,7 @@ async def search_specs(
             "subsystem": row["subsystem"],
             "summary": row["summary"],
             "format_hints": row["format_hints"],
+            "triggers": row["triggers"],
             "project": row["project_name"],
             "version": row["version"],
             "verified_at": row["verified_at"].isoformat() if row["verified_at"] else None,

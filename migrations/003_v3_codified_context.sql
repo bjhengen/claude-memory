@@ -195,6 +195,17 @@ BEGIN
         UNION ALL
 
         SELECT
+            'mcp_server'::TEXT as source_type,
+            ms.id as source_id,
+            ms.name::TEXT as title,
+            ms.description::TEXT as content,
+            1 - (ms.embedding <=> query_embedding) as similarity
+        FROM mcp_servers ms
+        WHERE ms.embedding IS NOT NULL AND ms.retired_at IS NULL
+
+        UNION ALL
+
+        SELECT
             'mcp_tool'::TEXT as source_type,
             mt.id as source_id,
             mt.tool_name::TEXT as title,
