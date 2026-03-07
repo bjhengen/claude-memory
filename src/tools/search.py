@@ -21,14 +21,12 @@ async def search(query: str, limit: int = 5, ctx: Context = None) -> str:
     """
     app = ctx.request_context.lifespan_context
 
-    # Generate embedding for query
     embedding = await get_embedding(app.openai, query)
     embedding_str = format_embedding(embedding)
 
-    # Search using the semantic_search function
     rows = await app.db.fetch(
-        "SELECT * FROM semantic_search($1::vector, $2)",
-        embedding_str, limit
+        "SELECT * FROM semantic_search($1::vector, $2, $3)",
+        embedding_str, query, limit
     )
 
     if not rows:
@@ -36,13 +34,18 @@ async def search(query: str, limit: int = 5, ctx: Context = None) -> str:
 
     results = []
     for row in rows:
-        results.append({
+        result = {
             "type": row["source_type"],
             "id": row["source_id"],
             "title": row["title"],
             "content": row["content"][:500] if row["content"] else None,
-            "similarity": round(row["similarity"], 3)
-        })
+            "similarity": round(row["similarity"], 3),
+            "effective_score": round(row["effective_score"], 3),
+        }
+        if row["source_type"] == "lesson":
+            result["upvotes"] = row["upvotes"]
+            result["downvotes"] = row["downvotes"]
+        results.append(result)
 
     return json.dumps({"results": results})
 
@@ -74,11 +77,13 @@ async def search_lessons(
     params = []
 
     if query:
-        # When query is provided, embedding is $1, so filter params start at $2
+        # When query is provided: $1 = embedding, $2 = query text
+        # Filter params start at $3
         embedding = await get_embedding(app.openai, query)
         embedding_str = format_embedding(embedding)
         params.append(embedding_str)
-        param_idx = 2
+        params.append(query)
+        param_idx = 3
     else:
         param_idx = 1
 
@@ -105,17 +110,34 @@ async def search_lessons(
     if query:
         sql = f"""
             SELECT l.*, p.name as project_name,
-                   1 - (l.embedding <=> $1::vector) as similarity
+                   1 - (l.embedding <=> $1::vector) as similarity,
+                   CASE WHEN l.tsv @@ plainto_tsquery('english', $2)
+                        THEN ts_rank(l.tsv, plainto_tsquery('english', $2)) * 0.3
+                        ELSE 0.0
+                   END as keyword_boost,
+                   CASE WHEN (COALESCE(l.upvotes, 0) + COALESCE(l.downvotes, 0)) > 0
+                        THEN 0.5 + (COALESCE(l.upvotes, 0)::FLOAT / (COALESCE(l.upvotes, 0) + COALESCE(l.downvotes, 0))::FLOAT * 0.5)
+                        ELSE 1.0
+                   END as confidence,
+                   (SELECT COUNT(*) FROM annotations a WHERE a.entity_type = 'lesson' AND a.entity_id = l.id) as annotation_count
             FROM lessons l
             LEFT JOIN projects p ON l.project_id = p.id
             WHERE {where_clause} AND l.embedding IS NOT NULL
-            ORDER BY similarity DESC
+            ORDER BY (1 - (l.embedding <=> $1::vector)
+                      + CASE WHEN l.tsv @@ plainto_tsquery('english', $2)
+                             THEN ts_rank(l.tsv, plainto_tsquery('english', $2)) * 0.3
+                             ELSE 0.0 END)
+                     * CASE WHEN (COALESCE(l.upvotes, 0) + COALESCE(l.downvotes, 0)) > 0
+                            THEN 0.5 + (COALESCE(l.upvotes, 0)::FLOAT / (COALESCE(l.upvotes, 0) + COALESCE(l.downvotes, 0))::FLOAT * 0.5)
+                            ELSE 1.0 END
+                     DESC
             LIMIT ${param_idx}
         """
         params.append(limit)
     else:
         sql = f"""
-            SELECT l.*, p.name as project_name
+            SELECT l.*, p.name as project_name,
+                   (SELECT COUNT(*) FROM annotations a WHERE a.entity_type = 'lesson' AND a.entity_id = l.id) as annotation_count
             FROM lessons l
             LEFT JOIN projects p ON l.project_id = p.id
             WHERE {where_clause}
@@ -128,7 +150,7 @@ async def search_lessons(
 
     results = []
     for row in rows:
-        results.append({
+        result = {
             "id": row["id"],
             "title": row["title"],
             "content": row["content"],
@@ -136,8 +158,12 @@ async def search_lessons(
             "tags": row["tags"],
             "severity": row["severity"],
             "learned_at": row["learned_at"].isoformat() if row["learned_at"] else None,
-            "similarity": round(row["similarity"], 3) if "similarity" in row.keys() else None
-        })
+            "similarity": round(row["similarity"], 3) if "similarity" in row.keys() else None,
+            "upvotes": row.get("upvotes", 0),
+            "downvotes": row.get("downvotes", 0),
+            "annotation_count": row.get("annotation_count", 0),
+        }
+        results.append(result)
 
     return json.dumps({"lessons": results})
 
@@ -267,8 +293,8 @@ async def find_context(
     # --- Lessons tier ---
     if "lessons" in active_tiers:
         lesson_conditions = ["l.embedding IS NOT NULL", "l.retired_at IS NULL"]
-        lesson_params = [embedding_str]
-        lesson_idx = 2
+        lesson_params = [embedding_str, query]
+        lesson_idx = 3
 
         if project_id:
             lesson_conditions.append(f"l.project_id = ${lesson_idx}")
@@ -281,12 +307,29 @@ async def find_context(
         rows = await app.db.fetch(
             f"""
             SELECT l.id, l.title, l.content, l.tags, l.severity,
+                   l.upvotes, l.downvotes,
                    p.name as project_name,
-                   1 - (l.embedding <=> $1::vector) as similarity
+                   1 - (l.embedding <=> $1::vector) as similarity,
+                   CASE WHEN l.tsv @@ plainto_tsquery('english', $2)
+                        THEN ts_rank(l.tsv, plainto_tsquery('english', $2)) * 0.3
+                        ELSE 0.0
+                   END as keyword_boost,
+                   CASE WHEN (COALESCE(l.upvotes, 0) + COALESCE(l.downvotes, 0)) > 0
+                        THEN 0.5 + (COALESCE(l.upvotes, 0)::FLOAT / (COALESCE(l.upvotes, 0) + COALESCE(l.downvotes, 0))::FLOAT * 0.5)
+                        ELSE 1.0
+                   END as confidence,
+                   (SELECT COUNT(*) FROM annotations a WHERE a.entity_type = 'lesson' AND a.entity_id = l.id) as annotation_count
             FROM lessons l
             LEFT JOIN projects p ON l.project_id = p.id
             WHERE {lesson_where}
-            ORDER BY similarity DESC
+            ORDER BY (1 - (l.embedding <=> $1::vector)
+                      + CASE WHEN l.tsv @@ plainto_tsquery('english', $2)
+                             THEN ts_rank(l.tsv, plainto_tsquery('english', $2)) * 0.3
+                             ELSE 0.0 END)
+                     * CASE WHEN (COALESCE(l.upvotes, 0) + COALESCE(l.downvotes, 0)) > 0
+                            THEN 0.5 + (COALESCE(l.upvotes, 0)::FLOAT / (COALESCE(l.upvotes, 0) + COALESCE(l.downvotes, 0))::FLOAT * 0.5)
+                            ELSE 1.0 END
+                     DESC
             LIMIT ${lesson_idx}
             """,
             *lesson_params
@@ -300,7 +343,10 @@ async def find_context(
                 "tags": row["tags"],
                 "severity": row["severity"],
                 "project": row["project_name"],
-                "similarity": round(row["similarity"], 3)
+                "similarity": round(row["similarity"], 3),
+                "upvotes": row["upvotes"],
+                "downvotes": row["downvotes"],
+                "annotation_count": row["annotation_count"],
             }
             for row in rows
         ]
