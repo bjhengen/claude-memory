@@ -24,3 +24,16 @@ async def resolve_project_id(pool: asyncpg.Pool, name: str) -> int | None:
         name
     )
     return row["id"] if row else None
+
+
+async def fetch_annotations(pool: asyncpg.Pool, entity_type: str, entity_id: int) -> list[dict]:
+    """Fetch all annotations for an entity. Used by get_* tools for auto-injection."""
+    rows = await pool.fetch(
+        "SELECT id, note, updated_at FROM annotations "
+        "WHERE entity_type = $1 AND entity_id = $2 ORDER BY created_at",
+        entity_type, entity_id
+    )
+    return [
+        {"id": r["id"], "note": r["note"], "updated_at": r["updated_at"].isoformat()}
+        for r in rows
+    ]
