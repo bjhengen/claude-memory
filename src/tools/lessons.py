@@ -1,4 +1,4 @@
-"""Lesson tools: log_lesson, log_pattern, update_lesson, retire_lesson."""
+"""Lesson tools: log_lesson, log_pattern, update_lesson, retire_lesson, rate_lesson."""
 
 import json
 
@@ -222,4 +222,62 @@ async def retire_lesson(
     return json.dumps({
         "success": True,
         "message": f"Lesson {lesson_id} ('{existing['title']}') retired"
+    })
+
+
+@mcp.tool()
+async def rate_lesson(
+    lesson_id: int,
+    rating: str,
+    comment: str = None,
+    ctx: Context = None
+) -> str:
+    """
+    Rate a lesson as helpful or unhelpful. Ratings affect search ranking —
+    low-rated lessons appear lower in results but are never auto-retired.
+
+    Args:
+        lesson_id: ID of the lesson to rate
+        rating: 'up' or 'down'
+        comment: Optional context for the rating (saved as annotation)
+    """
+    if rating not in ("up", "down"):
+        return json.dumps({"error": "rating must be 'up' or 'down'"})
+
+    app = ctx.request_context.lifespan_context
+
+    existing = await app.db.fetchrow(
+        "SELECT id, title, upvotes, downvotes FROM lessons WHERE id = $1",
+        lesson_id
+    )
+    if not existing:
+        return json.dumps({"error": f"Lesson {lesson_id} not found"})
+
+    column = "upvotes" if rating == "up" else "downvotes"
+    await app.db.execute(
+        f"UPDATE lessons SET {column} = COALESCE({column}, 0) + 1, last_rated_at = NOW() WHERE id = $1",
+        lesson_id
+    )
+
+    new_up = (existing["upvotes"] or 0) + (1 if rating == "up" else 0)
+    new_down = (existing["downvotes"] or 0) + (1 if rating == "down" else 0)
+
+    # If comment provided, create an annotation on the lesson
+    if comment:
+        prefix = "upvote" if rating == "up" else "downvote"
+        await app.db.execute(
+            """
+            INSERT INTO annotations (entity_type, entity_id, note)
+            VALUES ('lesson', $1, $2)
+            """,
+            lesson_id, f"[{prefix}] {comment}"
+        )
+
+    return json.dumps({
+        "success": True,
+        "lesson_id": lesson_id,
+        "title": existing["title"],
+        "upvotes": new_up,
+        "downvotes": new_down,
+        "message": f"Lesson {lesson_id} rated '{rating}'"
     })
