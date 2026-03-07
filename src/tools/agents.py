@@ -5,7 +5,7 @@ from mcp.server.fastmcp import Context
 
 from src.server import mcp
 from src.db import get_embedding, format_embedding
-from src.helpers import resolve_project_id
+from src.helpers import resolve_project_id, fetch_annotations
 
 
 @mcp.tool()
@@ -100,6 +100,8 @@ async def get_agent(name: str, ctx: Context = None) -> str:
     if not row:
         return json.dumps({"error": f"Agent '{name}' not found or is retired"})
 
+    annotations = await fetch_annotations(app.db, "agent", row["id"])
+
     return json.dumps({
         "name": row["name"],
         "description": row["description"],
@@ -110,7 +112,8 @@ async def get_agent(name: str, ctx: Context = None) -> str:
         "tools": row["tools"],
         "project": row["project_name"],
         "version": row["version"],
-        "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None
+        "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+        "annotations": annotations
     })
 
 

@@ -5,7 +5,7 @@ from mcp.server.fastmcp import Context
 
 from src.server import mcp
 from src.db import get_embedding, format_embedding
-from src.helpers import resolve_project_id
+from src.helpers import resolve_project_id, fetch_annotations
 
 
 @mcp.tool()
@@ -84,6 +84,8 @@ async def get_spec(spec_id: int, ctx: Context = None) -> str:
     if not row:
         return json.dumps({"error": f"Specification {spec_id} not found"})
 
+    annotations = await fetch_annotations(app.db, "spec", spec_id)
+
     return json.dumps({
         "id": row["id"],
         "title": row["title"],
@@ -96,7 +98,8 @@ async def get_spec(spec_id: int, ctx: Context = None) -> str:
         "version": row["version"],
         "verified_at": row["verified_at"].isoformat() if row["verified_at"] else None,
         "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
-        "retired": row["retired_at"] is not None
+        "retired": row["retired_at"] is not None,
+        "annotations": annotations
     })
 
 
