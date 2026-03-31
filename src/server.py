@@ -41,6 +41,7 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     """Manage database connection pool lifecycle."""
     pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
     openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+    oauth_provider.set_pool(pool)
 
     try:
         yield AppContext(db=pool, openai=openai_client)
