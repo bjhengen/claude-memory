@@ -36,17 +36,38 @@ class AppContext:
     openai: AsyncOpenAI
 
 
+# App-level shared resources (outlive individual MCP sessions)
+_db_pool: asyncpg.Pool | None = None
+_openai_client: AsyncOpenAI | None = None
+
+
+async def _ensure_pool() -> tuple[asyncpg.Pool, AsyncOpenAI]:
+    """Create or return the shared connection pool and OpenAI client.
+
+    The pool lives at the ASGI app level, NOT per-MCP-session.
+    With stateless_http=True the MCP lifespan runs per-request;
+    creating/closing the pool there left OAuth routes (which run
+    outside MCP sessions) hitting a dead pool.
+    """
+    global _db_pool, _openai_client
+    if _db_pool is None or _db_pool._closed:
+        _db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
+        oauth_provider.set_pool(_db_pool)
+        logger.info("Database connection pool created")
+    if _openai_client is None:
+        _openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+    return _db_pool, _openai_client
+
+
 @asynccontextmanager
 async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
-    """Manage database connection pool lifecycle."""
-    pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
-    openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-    oauth_provider.set_pool(pool)
+    """Provide shared resources to MCP tool handlers.
 
-    try:
-        yield AppContext(db=pool, openai=openai_client)
-    finally:
-        await pool.close()
+    Pool is managed at ASGI app level (_ensure_pool / shutdown event),
+    NOT created or closed here — this runs per-session in stateless mode.
+    """
+    pool, openai_client = await _ensure_pool()
+    yield AppContext(db=pool, openai=openai_client)
 
 
 # Create OAuth provider
@@ -178,6 +199,24 @@ import src.tools.annotations  # noqa: E402, F401
 # ============================================
 
 app = mcp.streamable_http_app()
+
+
+@app.on_event("startup")
+async def startup():
+    """Create the shared DB pool at ASGI app startup (before any requests)."""
+    await _ensure_pool()
+    logger.info("ASGI app startup complete — pool ready for OAuth and MCP")
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    """Close the shared DB pool on ASGI app shutdown."""
+    global _db_pool
+    if _db_pool is not None:
+        await _db_pool.close()
+        _db_pool = None
+        logger.info("Database connection pool closed")
+
 
 if __name__ == "__main__":
     import uvicorn
