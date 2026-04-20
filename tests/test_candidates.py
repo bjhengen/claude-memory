@@ -32,7 +32,7 @@ async def _make_lesson(pool, title, content, embedding, project_id=None, retired
 @pytest.mark.asyncio
 async def test_find_candidates_returns_top_k_above_cosine_threshold(db_pool):
     async with db_pool.acquire() as conn:
-        await conn.execute("DELETE FROM lessons WHERE title LIKE 'T_CAND_%'")
+        await conn.execute("DELETE FROM lessons WHERE title LIKE 'T\\_%' ESCAPE '\\'")
 
     emb_a = [0.1] * 1536
     emb_b = [0.11] * 1536  # very close
@@ -55,7 +55,7 @@ async def test_find_candidates_returns_top_k_above_cosine_threshold(db_pool):
 @pytest.mark.asyncio
 async def test_find_candidates_excludes_retired_lessons(db_pool):
     async with db_pool.acquire() as conn:
-        await conn.execute("DELETE FROM lessons WHERE title LIKE 'T_CAND_RET_%'")
+        await conn.execute("DELETE FROM lessons WHERE title LIKE 'T\\_%' ESCAPE '\\'")
 
     emb = [0.2] * 1536
     async with db_pool.acquire() as conn:
@@ -76,8 +76,10 @@ async def test_find_candidates_excludes_retired_lessons(db_pool):
 
 @pytest.mark.asyncio
 async def test_find_candidates_scopes_to_project_or_null(db_pool):
+    # Clean ALL test lesson artifacts; uniform-value embeddings in fixtures
+    # collide at cosine=1.0 and would pollute top-k results otherwise.
     async with db_pool.acquire() as conn:
-        await conn.execute("DELETE FROM lessons WHERE title LIKE 'T_CAND_PROJ_%'")
+        await conn.execute("DELETE FROM lessons WHERE title LIKE 'T\\_%' ESCAPE '\\'")
         proj_a = await conn.fetchrow(
             "INSERT INTO projects (name) VALUES ('t_proj_a') "
             "ON CONFLICT (name) DO UPDATE SET name=EXCLUDED.name RETURNING id"

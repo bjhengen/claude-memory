@@ -174,3 +174,178 @@ async def _escalate_severity(conn, canonical_id: int, incoming_severity: str) ->
             "UPDATE lessons SET severity=$1 WHERE id=$2",
             incoming_severity, canonical_id,
         )
+
+
+async def execute_auto_supersede(
+    pool: asyncpg.Pool,
+    new_lesson_id: int,
+    existing_lesson_id: int,
+    verdict: JudgeVerdict,
+    cosine: float,
+    judge_model: str,
+    decided_by: str | None = None,
+    auto_decided: bool = True,
+) -> int:
+    """
+    Direction is new→existing: existing is retired, new is canonical.
+    Transfer existing's counters + tags to new.
+    For direction existing→new, caller should use execute_auto_merge with
+    new_lesson_id as the merged_id (existing is canonical).
+    """
+    if verdict.direction != "new→existing":
+        raise ValueError(
+            "execute_auto_supersede only handles direction='new→existing'; "
+            "use execute_auto_merge for 'existing→new'"
+        )
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            existing = await conn.fetchrow(
+                "SELECT upvotes, downvotes, tags FROM lessons WHERE id=$1",
+                existing_lesson_id,
+            )
+            if existing is None:
+                raise ValueError(f"existing lesson {existing_lesson_id} not found")
+            ex_up = existing["upvotes"] or 0
+            ex_down = existing["downvotes"] or 0
+
+            reason = f"superseded by {new_lesson_id}"
+            await conn.execute(
+                "UPDATE lessons SET retired_at=NOW(), retired_reason=$1 WHERE id=$2",
+                reason, existing_lesson_id,
+            )
+
+            await conn.execute(
+                "UPDATE lessons SET upvotes=COALESCE(upvotes,0)+$1, "
+                "downvotes=COALESCE(downvotes,0)+$2 WHERE id=$3",
+                ex_up, ex_down, new_lesson_id,
+            )
+
+            await conn.execute(
+                "UPDATE lessons SET tags=(SELECT ARRAY(SELECT DISTINCT unnest(tags || $1::text[]))) "
+                "WHERE id=$2",
+                existing["tags"] or [], new_lesson_id,
+            )
+
+            # Severity escalation: new takes max(new.severity, existing.severity)
+            ex_sev = await conn.fetchval(
+                "SELECT severity FROM lessons WHERE id=$1", existing_lesson_id,
+            )
+            await _escalate_severity(conn, new_lesson_id, ex_sev)
+
+            await conn.execute(
+                "UPDATE annotations SET entity_id=$1 "
+                "WHERE entity_type='lesson' AND entity_id=$2",
+                new_lesson_id, existing_lesson_id,
+            )
+
+            audit = await conn.fetchrow(
+                """
+                INSERT INTO lesson_merges
+                  (canonical_id, merged_id, action, judge_model, judge_confidence,
+                   judge_reasoning, cosine_similarity, auto_decided, decided_by,
+                   transferred_upvotes, transferred_downvotes)
+                VALUES ($1,$2,'superseded',$3,$4,$5,$6,$7,$8,$9,$10)
+                RETURNING id
+                """,
+                new_lesson_id, existing_lesson_id, judge_model, verdict.confidence,
+                verdict.reasoning, cosine, auto_decided, decided_by, ex_up, ex_down,
+            )
+
+            await _annotate(
+                conn, "lesson", new_lesson_id,
+                f"↗ Supersedes lesson #{existing_lesson_id}: {verdict.reasoning}",
+            )
+
+            return audit["id"]
+
+
+async def execute_enqueue(
+    pool: asyncpg.Pool,
+    new_lesson_id: int,
+    candidate_lesson_id: int,
+    verdict: JudgeVerdict,
+    cosine: float,
+    judge_model: str,
+    proposed_action: str,  # 'merged' | 'superseded'
+) -> int:
+    """Create a queue row and annotate both lessons with pending notices."""
+    if proposed_action not in ("merged", "superseded"):
+        raise ValueError(f"invalid proposed_action: {proposed_action}")
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                INSERT INTO consolidation_queue
+                  (new_lesson_id, candidate_lesson_id, proposed_action,
+                   proposed_direction, judge_model, judge_confidence,
+                   judge_reasoning, cosine_similarity)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+                RETURNING id
+                """,
+                new_lesson_id, candidate_lesson_id, proposed_action,
+                verdict.direction, judge_model, verdict.confidence,
+                verdict.reasoning, cosine,
+            )
+            queue_id = row["id"]
+
+            pending_new = (
+                f"⏸ Consolidation pending (queue #{queue_id}): proposed {proposed_action} "
+                f"with lesson #{candidate_lesson_id}. Confidence {verdict.confidence:.2f}. "
+                f"Run approve_consolidation({queue_id}) or reject_consolidation({queue_id})."
+            )
+            pending_cand = (
+                f"⏸ Consolidation pending (queue #{queue_id}): proposed {proposed_action} "
+                f"with lesson #{new_lesson_id}. Confidence {verdict.confidence:.2f}. "
+                f"Run approve_consolidation({queue_id}) or reject_consolidation({queue_id})."
+            )
+            await _annotate(conn, "lesson", new_lesson_id, pending_new)
+            await _annotate(conn, "lesson", candidate_lesson_id, pending_cand)
+
+            return queue_id
+
+
+async def execute_flag_conflict(
+    pool: asyncpg.Pool,
+    new_lesson_id: int,
+    candidate_lesson_id: int,
+    verdict: JudgeVerdict,
+    cosine: float,
+    judge_model: str,
+) -> int:
+    """
+    Insert a conflict row with canonical ordering (a_id < b_id) and annotate both.
+    Returns the new lesson_conflicts.id.
+    """
+    a_id, b_id = sorted([new_lesson_id, candidate_lesson_id])
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                INSERT INTO lesson_conflicts
+                  (lesson_a_id, lesson_b_id, judge_model, judge_confidence,
+                   judge_reasoning, cosine_similarity)
+                VALUES ($1,$2,$3,$4,$5,$6)
+                ON CONFLICT (lesson_a_id, lesson_b_id) DO UPDATE
+                  SET judge_confidence = EXCLUDED.judge_confidence,
+                      judge_reasoning = EXCLUDED.judge_reasoning,
+                      cosine_similarity = EXCLUDED.cosine_similarity,
+                      flagged_at = NOW()
+                RETURNING id
+                """,
+                a_id, b_id, judge_model, verdict.confidence,
+                verdict.reasoning, cosine,
+            )
+            conflict_id = row["id"]
+
+            def note_for(other: int) -> str:
+                return (
+                    f"⚠ Conflicts with lesson #{other} (confidence {verdict.confidence:.2f}): "
+                    f"{verdict.reasoning}. Resolve via resolve_conflict({conflict_id})."
+                )
+            await _annotate(conn, "lesson", a_id, note_for(b_id))
+            await _annotate(conn, "lesson", b_id, note_for(a_id))
+
+            return conflict_id
