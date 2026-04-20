@@ -232,3 +232,154 @@ async def reject_consolidation(
         "success": True, "queue_id": queue_id, "reviewer": reviewer,
         "reason": reason,
     })
+
+
+@mcp.tool()
+async def list_conflicts(
+    project: str = None,
+    unresolved_only: bool = True,
+    limit: int = 20,
+    ctx: Context = None,
+) -> str:
+    """
+    List flagged contradictions.
+
+    Args:
+        project: Filter by project (optional)
+        unresolved_only: If True (default), show only unresolved conflicts
+        limit: Maximum entries to return
+    """
+    app = ctx.request_context.lifespan_context
+
+    conditions = []
+    params = [limit]
+    if unresolved_only:
+        conditions.append("c.resolved_at IS NULL")
+    if project:
+        from src.helpers import resolve_project_id
+        pid = await resolve_project_id(app.db, project)
+        if pid is None:
+            return json.dumps({"conflicts": [], "message": f"project '{project}' not found"})
+        conditions.append(f"(la.project_id = ${len(params) + 1} OR lb.project_id = ${len(params) + 1})")
+        params.append(pid)
+
+    where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+
+    rows = await app.db.fetch(
+        f"""
+        SELECT c.id, c.lesson_a_id, c.lesson_b_id, c.judge_confidence,
+               c.judge_reasoning, c.flagged_at,
+               la.title AS a_title, lb.title AS b_title,
+               EXTRACT(EPOCH FROM (NOW() - c.flagged_at)) / 86400.0 AS age_days
+        FROM lesson_conflicts c
+        JOIN lessons la ON la.id = c.lesson_a_id
+        JOIN lessons lb ON lb.id = c.lesson_b_id
+        {where_clause}
+        ORDER BY c.flagged_at DESC
+        LIMIT $1
+        """,
+        *params,
+    )
+
+    results = [
+        {
+            "conflict_id": r["id"],
+            "lesson_a": {"id": r["lesson_a_id"], "title": r["a_title"]},
+            "lesson_b": {"id": r["lesson_b_id"], "title": r["b_title"]},
+            "confidence": float(r["judge_confidence"]),
+            "reasoning": r["judge_reasoning"],
+            "flagged_at": r["flagged_at"].isoformat(),
+            "age_days": round(float(r["age_days"]), 2),
+        }
+        for r in rows
+    ]
+    return json.dumps({"conflicts": results, "count": len(results)})
+
+
+@mcp.tool()
+async def resolve_conflict(
+    conflict_id: int,
+    resolution: str,  # 'kept_a' | 'kept_b' | 'kept_both' | 'irrelevant'
+    note: str = None,
+    reviewer: str = None,
+    ctx: Context = None,
+) -> str:
+    """
+    Resolve a flagged contradiction.
+
+    'kept_a' → retires lesson B (conflict resolved: A preferred)
+    'kept_b' → retires lesson A (symmetric)
+    'kept_both' → marks resolved; no lesson changes
+    'irrelevant' → marks as false positive; no changes
+
+    Args:
+        conflict_id: ID of the lesson_conflicts row
+        resolution: One of kept_a | kept_b | kept_both | irrelevant
+        note: Optional explanation
+        reviewer: Who resolved
+    """
+    if resolution not in ("kept_a", "kept_b", "kept_both", "irrelevant"):
+        return json.dumps({"error": f"invalid resolution '{resolution}'"})
+
+    app = ctx.request_context.lifespan_context
+    reviewer = reviewer or "unknown"
+
+    c = await app.db.fetchrow("SELECT * FROM lesson_conflicts WHERE id=$1", conflict_id)
+    if c is None:
+        return json.dumps({"error": f"conflict {conflict_id} not found"})
+    if c["resolved_at"] is not None:
+        return json.dumps({"error": f"conflict {conflict_id} already resolved"})
+
+    retired_id = None
+    async with app.db.acquire() as conn:
+        async with conn.transaction():
+            if resolution == "kept_a":
+                retired_id = c["lesson_b_id"]
+                await conn.execute(
+                    "UPDATE lessons SET retired_at=NOW(), "
+                    "retired_reason='conflict resolved: A preferred' WHERE id=$1",
+                    retired_id,
+                )
+            elif resolution == "kept_b":
+                retired_id = c["lesson_a_id"]
+                await conn.execute(
+                    "UPDATE lessons SET retired_at=NOW(), "
+                    "retired_reason='conflict resolved: B preferred' WHERE id=$1",
+                    retired_id,
+                )
+
+            await conn.execute(
+                "UPDATE lesson_conflicts SET resolved_at=NOW(), resolved_by=$1, "
+                "resolution=$2, resolution_note=$3 WHERE id=$4",
+                reviewer, resolution, note, conflict_id,
+            )
+
+            # Clear the "⚠ Conflicts with lesson ..." annotations from both
+            marker_a = f"⚠ Conflicts with lesson #{c['lesson_b_id']}"
+            marker_b = f"⚠ Conflicts with lesson #{c['lesson_a_id']}"
+            for lesson_id, marker in [(c["lesson_a_id"], marker_a), (c["lesson_b_id"], marker_b)]:
+                row = await conn.fetchrow(
+                    "SELECT id, note FROM annotations WHERE entity_type='lesson' AND entity_id=$1",
+                    lesson_id,
+                )
+                if not row or marker not in row["note"]:
+                    continue
+                cleaned = "\n".join(
+                    ln for ln in row["note"].split("\n") if marker not in ln
+                ).strip("\n").strip()
+                while cleaned.endswith("---"):
+                    cleaned = cleaned[:-3].rstrip()
+                while cleaned.startswith("---"):
+                    cleaned = cleaned[3:].lstrip()
+                if not cleaned:
+                    await conn.execute("DELETE FROM annotations WHERE id=$1", row["id"])
+                else:
+                    await conn.execute(
+                        "UPDATE annotations SET note=$1, updated_at=NOW() WHERE id=$2",
+                        cleaned, row["id"],
+                    )
+
+    return json.dumps({
+        "success": True, "conflict_id": conflict_id, "resolution": resolution,
+        "retired_lesson_id": retired_id, "reviewer": reviewer,
+    })
