@@ -197,6 +197,7 @@ import src.tools.agents      # noqa: E402, F401
 import src.tools.specs       # noqa: E402, F401
 import src.tools.mcp_registry  # noqa: E402, F401
 import src.tools.annotations  # noqa: E402, F401
+import src.tools.consolidation  # noqa: E402, F401
 
 
 # ============================================
