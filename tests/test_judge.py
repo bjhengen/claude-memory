@@ -57,6 +57,26 @@ async def test_judge_parses_supersedes_with_direction(mock_anthropic):
 
 
 @pytest.mark.asyncio
+async def test_judge_strips_code_fences(mock_anthropic):
+    """Haiku often wraps JSON in ```json ... ``` fences; parser must strip."""
+    fenced = '```json\n{"relationship": "duplicate", "direction": null, ' \
+             '"confidence": 0.88, "reasoning": "same advice"}\n```'
+    resp = MagicMock()
+    resp.content = [MagicMock(text=fenced)]
+    mock_anthropic.messages.create.return_value = resp
+
+    verdict = await adjudicate(
+        mock_anthropic,
+        new_title="A", new_content="x",
+        candidate_title="B", candidate_content="y",
+        model="claude-haiku-4-5-20251001", timeout=2.0,
+    )
+
+    assert verdict.relationship == "duplicate"
+    assert verdict.confidence == 0.88
+
+
+@pytest.mark.asyncio
 async def test_judge_returns_unrelated_on_malformed_json(mock_anthropic):
     resp = MagicMock()
     resp.content = [MagicMock(text="this is not json")]

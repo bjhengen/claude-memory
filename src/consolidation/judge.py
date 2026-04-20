@@ -54,7 +54,17 @@ def _build_user_prompt(new_title: str, new_content: str,
 
 
 def _parse(text: str) -> JudgeVerdict | None:
-    """Parse judge output. Returns None on any parse failure."""
+    """Parse judge output. Returns None on any parse failure.
+
+    Handles ```json ... ``` fenced output that Haiku often emits despite
+    the system prompt asking for bare JSON.
+    """
+    text = text.strip()
+    if text.startswith("```"):
+        lines = text.split("\n")
+        # Drop opening ``` (or ```json) and closing ```
+        if lines[0].startswith("```") and lines[-1].strip() == "```":
+            text = "\n".join(lines[1:-1])
     try:
         data = json.loads(text.strip())
         rel = data["relationship"]
