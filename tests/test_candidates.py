@@ -79,7 +79,10 @@ async def test_find_candidates_scopes_to_project_or_null(db_pool):
     # Clean ALL test lesson artifacts; uniform-value embeddings in fixtures
     # collide at cosine=1.0 and would pollute top-k results otherwise.
     async with db_pool.acquire() as conn:
-        await conn.execute("DELETE FROM lessons WHERE title LIKE 'T\\_%' ESCAPE '\\'")
+        await conn.execute(
+            "DELETE FROM lessons WHERE title LIKE 'T\\_%' ESCAPE '\\' "
+            "OR title LIKE 'SMOKE\\_%' ESCAPE '\\'"
+        )
         proj_a = await conn.fetchrow(
             "INSERT INTO projects (name) VALUES ('t_proj_a') "
             "ON CONFLICT (name) DO UPDATE SET name=EXCLUDED.name RETURNING id"
