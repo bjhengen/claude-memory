@@ -13,3 +13,6 @@ openai>=1.0.0
 # ASGI server
 uvicorn>=0.30.0
 starlette>=0.40.0
+
+# Anthropic SDK for consolidation judge (v5)
+anthropic>=0.40.0
