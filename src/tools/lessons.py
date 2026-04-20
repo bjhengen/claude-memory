@@ -61,11 +61,30 @@ async def log_lesson(
         """,
         title, content, project_id, tags or [], severity, embedding_str
     )
+    lesson_id = row["id"]
+
+    # v5: log-time consolidation. Never fatal.
+    consolidation = {"action_taken": "ignored", "reason": "exception"}
+    try:
+        from src.consolidation.orchestrator import consolidate_at_log
+        consolidation = await consolidate_at_log(
+            pool=app.db,
+            anthropic=app.anthropic,
+            new_lesson_id=lesson_id,
+            new_title=title,
+            new_content=content,
+            new_embedding=embedding,
+            project_id=project_id,
+        )
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("consolidate_at_log raised: %s", e)
 
     return json.dumps({
         "success": True,
-        "lesson_id": row["id"],
-        "message": f"Lesson '{title}' saved successfully"
+        "lesson_id": lesson_id,
+        "message": f"Lesson '{title}' saved successfully",
+        "consolidation": consolidation,
     })
 
 

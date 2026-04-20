@@ -12,6 +12,7 @@ from typing import AsyncIterator
 
 import asyncpg
 from openai import AsyncOpenAI
+from anthropic import AsyncAnthropic
 from mcp.server.fastmcp import FastMCP
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
 from starlette.requests import Request
@@ -34,29 +35,33 @@ class AppContext:
     """Shared application resources."""
     db: asyncpg.Pool
     openai: AsyncOpenAI
+    anthropic: AsyncAnthropic
 
 
 # App-level shared resources (outlive individual MCP sessions)
 _db_pool: asyncpg.Pool | None = None
 _openai_client: AsyncOpenAI | None = None
+_anthropic_client: AsyncAnthropic | None = None
 
 
-async def _ensure_pool() -> tuple[asyncpg.Pool, AsyncOpenAI]:
-    """Create or return the shared connection pool and OpenAI client.
+async def _ensure_pool() -> tuple[asyncpg.Pool, AsyncOpenAI, AsyncAnthropic]:
+    """Create or return the shared connection pool, OpenAI, and Anthropic clients.
 
     The pool lives at the ASGI app level, NOT per-MCP-session.
     With stateless_http=True the MCP lifespan runs per-request;
     creating/closing the pool there left OAuth routes (which run
     outside MCP sessions) hitting a dead pool.
     """
-    global _db_pool, _openai_client
+    global _db_pool, _openai_client, _anthropic_client
     if _db_pool is None or _db_pool._closed:
         _db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
         oauth_provider.set_pool(_db_pool)
         logger.info("Database connection pool created")
     if _openai_client is None:
         _openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-    return _db_pool, _openai_client
+    if _anthropic_client is None:
+        _anthropic_client = AsyncAnthropic()  # reads ANTHROPIC_API_KEY from env
+    return _db_pool, _openai_client, _anthropic_client
 
 
 @asynccontextmanager
@@ -66,8 +71,8 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     Pool is managed at ASGI app level (_ensure_pool / shutdown event),
     NOT created or closed here — this runs per-session in stateless mode.
     """
-    pool, openai_client = await _ensure_pool()
-    yield AppContext(db=pool, openai=openai_client)
+    pool, openai_client, anthropic_client = await _ensure_pool()
+    yield AppContext(db=pool, openai=openai_client, anthropic=anthropic_client)
 
 
 # Create OAuth provider

@@ -12,7 +12,7 @@ openai>=1.0.0
 
 # ASGI server
 uvicorn>=0.30.0
-starlette>=0.40.0
+starlette>=0.40.0,<1.0.0  # 1.0.0 dropped on_event() — pin until server migrates to lifespan
 
 # Anthropic SDK for consolidation judge (v5)
 anthropic>=0.40.0
