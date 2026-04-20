@@ -383,3 +383,66 @@ async def resolve_conflict(
         "success": True, "conflict_id": conflict_id, "resolution": resolution,
         "retired_lesson_id": retired_id, "reviewer": reviewer,
     })
+
+
+@mcp.tool()
+async def undo_consolidation(
+    merge_id: int,
+    reason: str,
+    reviewer: str = None,
+    ctx: Context = None,
+) -> str:
+    """
+    Reverse a previously-applied merge or supersede action.
+
+    Un-retires the merged/superseded lesson, subtracts the transferred rating
+    counters from the canonical lesson, and marks the lesson_merges row as
+    reversed. Does NOT restore previously-repointed annotations.
+
+    Args:
+        merge_id: ID of the lesson_merges row to reverse
+        reason: Required — why this is being reversed
+        reviewer: Who is reversing
+    """
+    if not reason or not reason.strip():
+        return json.dumps({"error": "reason is required for undo_consolidation"})
+
+    app = ctx.request_context.lifespan_context
+    reviewer = reviewer or "unknown"
+
+    m = await app.db.fetchrow("SELECT * FROM lesson_merges WHERE id=$1", merge_id)
+    if m is None:
+        return json.dumps({"error": f"merge {merge_id} not found"})
+    if m["reversed_at"] is not None:
+        return json.dumps({"error": f"merge {merge_id} already reversed at {m['reversed_at'].isoformat()}"})
+
+    async with app.db.acquire() as conn:
+        async with conn.transaction():
+            # Un-retire the merged lesson
+            await conn.execute(
+                "UPDATE lessons SET retired_at=NULL, retired_reason=NULL WHERE id=$1",
+                m["merged_id"],
+            )
+            # Subtract transferred counters from canonical
+            await conn.execute(
+                "UPDATE lessons SET upvotes=GREATEST(COALESCE(upvotes,0) - $1, 0), "
+                "downvotes=GREATEST(COALESCE(downvotes,0) - $2, 0) WHERE id=$3",
+                m["transferred_upvotes"], m["transferred_downvotes"], m["canonical_id"],
+            )
+            # Mark the merge reversed
+            await conn.execute(
+                "UPDATE lesson_merges SET reversed_at=NOW(), reversed_by=$1, "
+                "reversed_reason=$2 WHERE id=$3",
+                reviewer, reason, merge_id,
+            )
+            # Annotation on canonical recording the reversal
+            from src.consolidation.actor import _annotate
+            await _annotate(
+                conn, "lesson", m["canonical_id"],
+                f"↺ Merge #{merge_id} reversed by {reviewer}: {reason}",
+            )
+
+    return json.dumps({
+        "success": True, "merge_id": merge_id,
+        "restored_lesson_id": m["merged_id"], "reviewer": reviewer,
+    })
