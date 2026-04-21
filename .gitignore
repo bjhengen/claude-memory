@@ -4,6 +4,9 @@
 # Personal infrastructure documentation
 docs/CLAUDE_slmbeast.md
 
+# Point-in-time analysis reports (regenerable from prod DB)
+docs/reports/
+
 # Python
 __pycache__/
 *.py[cod]
