@@ -100,3 +100,177 @@ async def fetch_candidate_rows(
         batch_run_id, verdict_in, confidence_gte,
     )
     return [dict(r) for r in rows]
+
+
+import json
+import logging
+
+from mcp.server.fastmcp import Context
+
+from src.server import mcp
+from src.consolidation.actor import execute_auto_merge, execute_auto_supersede
+from src.consolidation.judge import JudgeVerdict
+
+_logger = logging.getLogger(__name__)
+
+
+@mcp.tool()
+async def apply_backlog_batch(
+    batch_run_id: str,
+    confirm: bool = False,
+    verdict_in: list[str] = None,
+    confidence_gte: float = 0.90,
+    max_apply: int = 50,
+    reviewer: str = None,
+    ctx: Context = None,
+) -> str:
+    """
+    Apply high-confidence backlog_analysis rows as real lesson_merges.
+
+    Preview-by-default: without confirm=true, returns a summary of what WOULD
+    happen and writes nothing.
+
+    Apply mode (confirm=true) requires a non-empty reviewer. Applies at most
+    max_apply pairs in one call; re-call to process more.
+
+    Args:
+        batch_run_id: The batch_run_id from backlog_analysis (e.g., 'pilot-2026-04-21')
+        confirm: If False (default), preview only — no DB writes
+        verdict_in: Which verdict types to apply (default: ['duplicate', 'supersedes'])
+        confidence_gte: Minimum confidence threshold (default 0.90)
+        max_apply: Cap on pairs applied per call (default 50)
+        reviewer: Required when confirm=true; recorded as decided_by in lesson_merges
+    """
+    if verdict_in is None:
+        verdict_in = ["duplicate", "supersedes"]
+
+    app = ctx.request_context.lifespan_context
+    pool = app.db
+
+    # Fetch + classify
+    rows = await fetch_candidate_rows(pool, batch_run_id, verdict_in, confidence_gte)
+    eligible, skipped = classify_eligibility(rows)
+    skip_reasons: dict[str, int] = {}
+    for s in skipped:
+        skip_reasons[s["reason"]] = skip_reasons.get(s["reason"], 0) + 1
+
+    if not confirm:
+        first_10 = [
+            {
+                "lesson_a_id": r["lesson_a_id"], "lesson_b_id": r["lesson_b_id"],
+                "a_title": r["a_title"], "b_title": r["b_title"],
+                "verdict": r["verdict"], "direction": r["direction"],
+                "confidence": float(r["confidence"]),
+                "cosine": float(r["cosine_similarity"]),
+                "reasoning": r["reasoning"],
+            }
+            for r in eligible[:10]
+        ]
+        return json.dumps({
+            "preview": True,
+            "batch_run_id": batch_run_id,
+            "filters": {
+                "verdict_in": verdict_in,
+                "confidence_gte": confidence_gte,
+            },
+            "would_apply": min(len(eligible), max_apply),
+            "would_skip": len(skipped),
+            "skip_reasons": skip_reasons,
+            "first_10": first_10,
+            "total_eligible": len(eligible),
+            "next_step": "call again with confirm=true, reviewer='your-name' to apply",
+        })
+
+    # Apply mode
+    if not reviewer or not reviewer.strip():
+        return json.dumps({"error": "reviewer is required when confirm=true"})
+
+    to_apply = eligible[:max_apply]
+    applied_merge_ids: list[int] = []
+    apply_errors = 0
+
+    for r in to_apply:
+        try:
+            verdict_obj = JudgeVerdict(
+                relationship=r["verdict"],
+                direction=r["direction"],
+                confidence=float(r["confidence"]),
+                reasoning=r["reasoning"],
+            )
+            cosine = float(r["cosine_similarity"])
+            model = r["judge_model"]
+
+            if r["verdict"] == "duplicate":
+                async with pool.acquire() as conn:
+                    canonical_id, merged_id = await _pick_canonical(
+                        conn, r["lesson_a_id"], r["lesson_b_id"],
+                    )
+                merge_id = await execute_auto_merge(
+                    pool,
+                    new_lesson_id=merged_id,
+                    canonical_id=canonical_id,
+                    verdict=verdict_obj,
+                    cosine=cosine,
+                    judge_model=model,
+                    decided_by=reviewer,
+                    auto_decided=False,
+                )
+            elif r["verdict"] == "supersedes":
+                if r["direction"] == "new→existing":
+                    # A supersedes B: retire B, A survives.
+                    merge_id = await execute_auto_supersede(
+                        pool,
+                        new_lesson_id=r["lesson_a_id"],
+                        existing_lesson_id=r["lesson_b_id"],
+                        verdict=verdict_obj,
+                        cosine=cosine,
+                        judge_model=model,
+                        decided_by=reviewer,
+                        auto_decided=False,
+                    )
+                elif r["direction"] == "existing→new":
+                    # B supersedes A: retire A, B survives.
+                    # execute_auto_supersede has a hard guard rejecting
+                    # direction='existing→new', so use execute_auto_merge
+                    # instead: merge A into B (B is canonical).
+                    merge_id = await execute_auto_merge(
+                        pool,
+                        new_lesson_id=r["lesson_a_id"],
+                        canonical_id=r["lesson_b_id"],
+                        verdict=verdict_obj,
+                        cosine=cosine,
+                        judge_model=model,
+                        decided_by=reviewer,
+                        auto_decided=False,
+                    )
+                else:
+                    _logger.warning(
+                        "supersedes row missing direction: a=%s b=%s",
+                        r["lesson_a_id"], r["lesson_b_id"],
+                    )
+                    apply_errors += 1
+                    continue
+            else:
+                _logger.warning("unexpected verdict: %s", r["verdict"])
+                apply_errors += 1
+                continue
+
+            applied_merge_ids.append(merge_id)
+        except Exception as e:
+            _logger.warning(
+                "apply failed for pair (%s,%s): %s",
+                r["lesson_a_id"], r["lesson_b_id"], e,
+            )
+            apply_errors += 1
+
+    remaining = max(0, len(eligible) - len(to_apply))
+    return json.dumps({
+        "applied": len(applied_merge_ids),
+        "skipped": len(skipped),
+        "apply_errors": apply_errors,
+        "skip_reasons": skip_reasons,
+        "merge_ids": applied_merge_ids,
+        "reviewer": reviewer,
+        "batch_run_id": batch_run_id,
+        "remaining_above_threshold": remaining,
+    })
