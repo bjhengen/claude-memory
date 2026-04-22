@@ -446,3 +446,110 @@ async def undo_consolidation(
         "success": True, "merge_id": merge_id,
         "restored_lesson_id": m["merged_id"], "reviewer": reviewer,
     })
+
+
+async def _compute_stats(pool, days: int) -> dict:
+    """
+    Aggregate consolidation activity over the last `days` days.
+
+    Returns a dict with window-scoped counts for merges, conflicts, reversals
+    plus always-current counts for pending conflicts and queue depth.
+    Breaks out auto vs human decisions and duplicates vs supersedes.
+
+    `avg_confidence` is None when no merges are in the window (instead of NaN/0),
+    so callers can distinguish "no activity" from "low-confidence activity."
+    """
+    row = await pool.fetchrow(
+        """
+        SELECT
+          (SELECT COUNT(*) FROM lessons
+             WHERE learned_at >= NOW() - ($1 * INTERVAL '1 day')) AS new_lessons,
+
+          (SELECT COUNT(*) FROM lesson_merges
+             WHERE created_at >= NOW() - ($1 * INTERVAL '1 day')
+               AND reversed_at IS NULL) AS merges_in_window,
+
+          (SELECT COUNT(*) FROM lesson_merges
+             WHERE created_at >= NOW() - ($1 * INTERVAL '1 day')
+               AND reversed_at IS NULL
+               AND action = 'merged') AS duplicates_merged,
+
+          (SELECT COUNT(*) FROM lesson_merges
+             WHERE created_at >= NOW() - ($1 * INTERVAL '1 day')
+               AND reversed_at IS NULL
+               AND action = 'superseded') AS supersedes,
+
+          (SELECT COUNT(*) FROM lesson_merges
+             WHERE created_at >= NOW() - ($1 * INTERVAL '1 day')
+               AND reversed_at IS NULL
+               AND auto_decided = true) AS auto_decided_count,
+
+          (SELECT COUNT(*) FROM lesson_merges
+             WHERE created_at >= NOW() - ($1 * INTERVAL '1 day')
+               AND reversed_at IS NULL
+               AND auto_decided = false) AS human_decided_count,
+
+          (SELECT AVG(judge_confidence) FROM lesson_merges
+             WHERE created_at >= NOW() - ($1 * INTERVAL '1 day')
+               AND reversed_at IS NULL) AS avg_confidence,
+
+          (SELECT COUNT(*) FROM lesson_merges
+             WHERE reversed_at >= NOW() - ($1 * INTERVAL '1 day')) AS reversals_in_window,
+
+          (SELECT COUNT(*) FROM lesson_conflicts
+             WHERE flagged_at >= NOW() - ($1 * INTERVAL '1 day')) AS conflicts_flagged,
+
+          (SELECT COUNT(*) FROM lesson_conflicts
+             WHERE resolved_at >= NOW() - ($1 * INTERVAL '1 day')) AS conflicts_resolved,
+
+          (SELECT COUNT(*) FROM lesson_conflicts
+             WHERE resolved_at IS NULL) AS conflicts_pending,
+
+          (SELECT COUNT(*) FROM consolidation_queue
+             WHERE decided_at IS NULL) AS queue_depth
+        """,
+        days,
+    )
+    d = dict(row)
+    return {
+        "window_days": days,
+        "new_lessons": d["new_lessons"],
+        "merges_in_window": d["merges_in_window"],
+        "duplicates_merged": d["duplicates_merged"],
+        "supersedes": d["supersedes"],
+        "auto_decided_count": d["auto_decided_count"],
+        "human_decided_count": d["human_decided_count"],
+        "avg_confidence": float(d["avg_confidence"]) if d["avg_confidence"] is not None else None,
+        "reversals_in_window": d["reversals_in_window"],
+        "conflicts_flagged": d["conflicts_flagged"],
+        "conflicts_resolved": d["conflicts_resolved"],
+        "conflicts_pending": d["conflicts_pending"],
+        "queue_depth": d["queue_depth"],
+    }
+
+
+@mcp.tool()
+async def get_consolidation_stats(days: int = 7, ctx: Context = None) -> str:
+    """
+    Return aggregated claude-memory consolidation activity over the last N days.
+
+    Intended for weekly recap / dashboard use (e.g., Quartermaster's weekly retros).
+    All window-scoped counts use a [NOW() - days, NOW()] window on the relevant
+    timestamp column. `conflicts_pending` and `queue_depth` are always-current
+    (no window).
+
+    Args:
+        days: Window size in days (default 7). Must be > 0.
+
+    Returns JSON with:
+        window_days, new_lessons, merges_in_window, duplicates_merged,
+        supersedes, auto_decided_count, human_decided_count, avg_confidence,
+        reversals_in_window, conflicts_flagged, conflicts_resolved,
+        conflicts_pending, queue_depth.
+    """
+    if days <= 0:
+        return json.dumps({"error": "days must be > 0"})
+
+    app = ctx.request_context.lifespan_context
+    stats = await _compute_stats(app.db, days)
+    return json.dumps(stats)
