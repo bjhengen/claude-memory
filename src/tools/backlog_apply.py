@@ -1,0 +1,41 @@
+"""v5.2 backlog batch-apply tool.
+
+Converts high-confidence rows from backlog_analysis into real lesson_merges
+entries via the existing v5 execute_auto_merge / execute_auto_supersede helpers.
+"""
+
+from typing import Any
+
+import asyncpg
+
+
+async def _pick_canonical(conn, a_id: int, b_id: int) -> tuple[int, int]:
+    """
+    Choose which lesson survives a duplicate merge when neither side is "new."
+
+    Rule: higher upvotes wins → older learned_at wins → lower id wins.
+    Returns (canonical_id, merged_id). canonical is the survivor.
+    """
+    from datetime import datetime
+
+    rows = await conn.fetch(
+        "SELECT id, COALESCE(upvotes, 0) AS upvotes, learned_at "
+        "FROM lessons WHERE id = ANY($1)",
+        [a_id, b_id],
+    )
+    if len(rows) != 2:
+        raise ValueError(f"expected 2 lessons for ids ({a_id}, {b_id}), got {len(rows)}")
+
+    # Sort ascending by sort_key; first element wins.
+    # - upvotes: higher wins → negate
+    # - learned_at: older wins → pass through; NULL coalesces to datetime.min
+    #   (since learned_at is nullable, Python < would raise TypeError without coalesce)
+    # - id: lower wins → pass through
+    def sort_key(r):
+        ts = r["learned_at"] or datetime.min
+        return (-r["upvotes"], ts, r["id"])
+
+    sorted_rows = sorted(rows, key=sort_key)
+    canonical_id = sorted_rows[0]["id"]
+    merged_id = sorted_rows[1]["id"]
+    return canonical_id, merged_id
