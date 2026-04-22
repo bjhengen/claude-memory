@@ -110,6 +110,28 @@ async def test_pick_canonical_lower_id_wins_on_full_tie(db_pool):
         # a was inserted first → lower id → wins on final tiebreak
         assert canonical < merged
         assert {canonical, merged} == {a, b}
+
+
+@pytest.mark.asyncio
+async def test_pick_canonical_handles_null_learned_at(db_pool):
+    """learned_at is nullable; NULL must not crash the Python sort."""
+    async with db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM lessons WHERE title LIKE 'T\\_PC\\_NULL\\_%' ESCAPE '\\'")
+        emb = "[" + ",".join(["0.1"] * 1536) + "]"
+        row_a = await conn.fetchrow(
+            "INSERT INTO lessons (title, content, embedding, upvotes, learned_at) "
+            "VALUES ($1, $2, $3::vector, $4, NULL) RETURNING id",
+            "T_PC_NULL_A", "x", emb, 0,
+        )
+        row_b = await conn.fetchrow(
+            "INSERT INTO lessons (title, content, embedding, upvotes) "
+            "VALUES ($1, $2, $3::vector, $4) RETURNING id",
+            "T_PC_NULL_B", "x", emb, 0,
+        )
+        canonical, merged = await _pick_canonical(conn, row_a["id"], row_b["id"])
+        # NULL learned_at sorts before any real timestamp via datetime.min coalesce,
+        # so the NULL row wins (older). We just verify no TypeError.
+        assert {canonical, merged} == {row_a["id"], row_b["id"]}
 ```
 
 - [ ] **Step 2: Sync and run the tests (expect FAIL — module missing)**
@@ -142,6 +164,8 @@ async def _pick_canonical(conn, a_id: int, b_id: int) -> tuple[int, int]:
     Rule: higher upvotes wins → older learned_at wins → lower id wins.
     Returns (canonical_id, merged_id). canonical is the survivor.
     """
+    from datetime import datetime
+
     rows = await conn.fetch(
         "SELECT id, COALESCE(upvotes, 0) AS upvotes, learned_at "
         "FROM lessons WHERE id = ANY($1)",
@@ -150,10 +174,14 @@ async def _pick_canonical(conn, a_id: int, b_id: int) -> tuple[int, int]:
     if len(rows) != 2:
         raise ValueError(f"expected 2 lessons for ids ({a_id}, {b_id}), got {len(rows)}")
 
-    # Sort descending by: upvotes (higher wins), learned_at (older = smaller wins → negate),
-    # id (lower wins → negate)
+    # Sort ascending by sort_key; first element wins.
+    # - upvotes: higher wins → negate
+    # - learned_at: older wins → pass through; NULL coalesces to datetime.min
+    #   (since learned_at is nullable, Python < would raise TypeError without coalesce)
+    # - id: lower wins → pass through
     def sort_key(r):
-        return (-r["upvotes"], r["learned_at"], r["id"])
+        ts = r["learned_at"] or datetime.min
+        return (-r["upvotes"], ts, r["id"])
 
     sorted_rows = sorted(rows, key=sort_key)
     canonical_id = sorted_rows[0]["id"]
@@ -510,6 +538,7 @@ async def apply_backlog_batch(
                     )
                 elif r["verdict"] == "supersedes":
                     if r["direction"] == "new→existing":
+                        # A supersedes B: retire B, A survives.
                         merge_id = await execute_auto_supersede(
                             pool,
                             new_lesson_id=r["lesson_a_id"],
@@ -521,10 +550,14 @@ async def apply_backlog_batch(
                             auto_decided=False,
                         )
                     elif r["direction"] == "existing→new":
-                        merge_id = await execute_auto_supersede(
+                        # B supersedes A: retire A, B survives.
+                        # execute_auto_supersede has a hard guard rejecting
+                        # direction='existing→new', so use execute_auto_merge
+                        # instead: merge A into B (B is canonical).
+                        merge_id = await execute_auto_merge(
                             pool,
-                            new_lesson_id=r["lesson_b_id"],
-                            existing_lesson_id=r["lesson_a_id"],
+                            new_lesson_id=r["lesson_a_id"],
+                            canonical_id=r["lesson_b_id"],
                             verdict=verdict_obj,
                             cosine=cosine,
                             judge_model=model,
@@ -589,7 +622,7 @@ Expected: `server import ok`
 ssh slmbeast "cd ~/dev/claude-memory && source venv/bin/activate && pytest tests/ 2>&1 | tail -5"
 ```
 
-Expected: all previous tests still pass + the 8 new ones (3 canonical + 5 eligibility) = 31 total.
+Expected: all previous tests still pass + the 9 new ones (4 canonical + 5 eligibility) = 32 total.
 
 - [ ] **Step 5: Commit**
 
