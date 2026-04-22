@@ -4,10 +4,19 @@ Converts high-confidence rows from backlog_analysis into real lesson_merges
 entries via the existing v5 execute_auto_merge / execute_auto_supersede helpers.
 """
 
+import json
+import logging
 from datetime import datetime
 from typing import Any
 
 import asyncpg
+from mcp.server.fastmcp import Context
+
+from src.consolidation.actor import execute_auto_merge, execute_auto_supersede
+from src.consolidation.judge import JudgeVerdict
+from src.server import mcp
+
+_logger = logging.getLogger(__name__)
 
 
 async def _pick_canonical(conn, a_id: int, b_id: int) -> tuple[int, int]:
@@ -100,18 +109,6 @@ async def fetch_candidate_rows(
         batch_run_id, verdict_in, confidence_gte,
     )
     return [dict(r) for r in rows]
-
-
-import json
-import logging
-
-from mcp.server.fastmcp import Context
-
-from src.server import mcp
-from src.consolidation.actor import execute_auto_merge, execute_auto_supersede
-from src.consolidation.judge import JudgeVerdict
-
-_logger = logging.getLogger(__name__)
 
 
 @mcp.tool()
