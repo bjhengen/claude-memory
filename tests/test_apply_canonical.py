@@ -5,9 +5,9 @@ import pytest
 from src.tools.backlog_apply import _pick_canonical
 
 
-async def _insert_lesson(conn, title, upvotes=0, downvotes=0, created_at=None):
+async def _insert_lesson(conn, title, upvotes=0, downvotes=0, learned_at=None):
     emb_str = "[" + ",".join(["0.1"] * 1536) + "]"
-    if created_at is None:
+    if learned_at is None:
         row = await conn.fetchrow(
             "INSERT INTO lessons (title, content, embedding, upvotes, downvotes) "
             "VALUES ($1, $2, $3::vector, $4, $5) RETURNING id",
@@ -17,7 +17,7 @@ async def _insert_lesson(conn, title, upvotes=0, downvotes=0, created_at=None):
         row = await conn.fetchrow(
             "INSERT INTO lessons (title, content, embedding, upvotes, downvotes, learned_at) "
             "VALUES ($1, $2, $3::vector, $4, $5, $6) RETURNING id",
-            title, "x", emb_str, upvotes, downvotes, created_at,
+            title, "x", emb_str, upvotes, downvotes, learned_at,
         )
     return row["id"]
 
@@ -46,8 +46,8 @@ async def test_pick_canonical_older_wins_on_upvote_tie(db_pool):
         await conn.execute("DELETE FROM lessons WHERE title LIKE 'T\\_PC\\_TIE\\_%' ESCAPE '\\'")
         earlier = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=30)
         later = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=1)
-        a = await _insert_lesson(conn, "T_PC_TIE_EARLY", upvotes=2, created_at=earlier)
-        b = await _insert_lesson(conn, "T_PC_TIE_LATE", upvotes=2, created_at=later)
+        a = await _insert_lesson(conn, "T_PC_TIE_EARLY", upvotes=2, learned_at=earlier)
+        b = await _insert_lesson(conn, "T_PC_TIE_LATE", upvotes=2, learned_at=later)
 
         canonical, merged = await _pick_canonical(conn, a, b)
         assert canonical == a  # older wins
@@ -85,6 +85,7 @@ async def test_pick_canonical_handles_null_learned_at(db_pool):
             "T_PC_NULL_B", "x", emb, 0,
         )
         canonical, merged = await _pick_canonical(conn, row_a["id"], row_b["id"])
-        # NULL learned_at sorts before any real timestamp via datetime.min coalesce,
-        # so the NULL row wins (older). We just verify no TypeError.
-        assert {canonical, merged} == {row_a["id"], row_b["id"]}
+        # NULL learned_at is coalesced to datetime.max, so the NULL row LOSES the
+        # age tiebreak. row_b has a real NOW() timestamp, so row_b wins.
+        assert canonical == row_b["id"]
+        assert merged == row_a["id"]

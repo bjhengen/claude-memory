@@ -4,6 +4,7 @@ Converts high-confidence rows from backlog_analysis into real lesson_merges
 entries via the existing v5 execute_auto_merge / execute_auto_supersede helpers.
 """
 
+from datetime import datetime
 from typing import Any
 
 import asyncpg
@@ -16,8 +17,6 @@ async def _pick_canonical(conn, a_id: int, b_id: int) -> tuple[int, int]:
     Rule: higher upvotes wins → older learned_at wins → lower id wins.
     Returns (canonical_id, merged_id). canonical is the survivor.
     """
-    from datetime import datetime
-
     rows = await conn.fetch(
         "SELECT id, COALESCE(upvotes, 0) AS upvotes, learned_at "
         "FROM lessons WHERE id = ANY($1)",
@@ -28,11 +27,13 @@ async def _pick_canonical(conn, a_id: int, b_id: int) -> tuple[int, int]:
 
     # Sort ascending by sort_key; first element wins.
     # - upvotes: higher wins → negate
-    # - learned_at: older wins → pass through; NULL coalesces to datetime.min
+    # - learned_at: older wins → pass through; NULL coalesces to datetime.max
     #   (since learned_at is nullable, Python < would raise TypeError without coalesce)
     # - id: lower wins → pass through
     def sort_key(r):
-        ts = r["learned_at"] or datetime.min
+        # NULL learned_at is "unknown age"; fall through to the id tiebreak rather
+        # than letting NULL rows win the age comparison via datetime.min coalesce.
+        ts = r["learned_at"] or datetime.max
         return (-r["upvotes"], ts, r["id"])
 
     sorted_rows = sorted(rows, key=sort_key)
