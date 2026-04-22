@@ -60,3 +60,43 @@ def classify_eligibility(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any
         else:
             eligible.append(r)
     return eligible, skip
+
+
+async def fetch_candidate_rows(
+    pool: asyncpg.Pool,
+    batch_run_id: str,
+    verdict_in: list[str],
+    confidence_gte: float,
+) -> list[dict[str, Any]]:
+    """
+    Return backlog_analysis rows matching filters, each annotated with:
+      - a_retired, b_retired (bool): current retirement status
+      - a_in_merges, b_in_merges (bool): participation in non-reversed merges
+      - a_title, b_title: for report/preview display
+    Sorted by confidence DESC.
+    """
+    rows = await pool.fetch(
+        """
+        WITH merged_lesson_ids AS (
+          SELECT canonical_id AS lesson_id FROM lesson_merges WHERE reversed_at IS NULL
+          UNION
+          SELECT merged_id AS lesson_id FROM lesson_merges WHERE reversed_at IS NULL
+        )
+        SELECT
+          ba.lesson_a_id, ba.lesson_b_id, ba.verdict, ba.direction,
+          ba.confidence, ba.cosine_similarity, ba.reasoning, ba.judge_model,
+          la.title AS a_title, (la.retired_at IS NOT NULL) AS a_retired,
+          lb.title AS b_title, (lb.retired_at IS NOT NULL) AS b_retired,
+          (la.id IN (SELECT lesson_id FROM merged_lesson_ids)) AS a_in_merges,
+          (lb.id IN (SELECT lesson_id FROM merged_lesson_ids)) AS b_in_merges
+        FROM backlog_analysis ba
+        JOIN lessons la ON la.id = ba.lesson_a_id
+        JOIN lessons lb ON lb.id = ba.lesson_b_id
+        WHERE ba.batch_run_id = $1
+          AND ba.verdict = ANY($2)
+          AND ba.confidence >= $3
+        ORDER BY ba.confidence DESC
+        """,
+        batch_run_id, verdict_in, confidence_gte,
+    )
+    return [dict(r) for r in rows]
