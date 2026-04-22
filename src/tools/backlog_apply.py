@@ -40,3 +40,23 @@ async def _pick_canonical(conn, a_id: int, b_id: int) -> tuple[int, int]:
     canonical_id = sorted_rows[0]["id"]
     merged_id = sorted_rows[1]["id"]
     return canonical_id, merged_id
+
+
+def classify_eligibility(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """
+    Partition rows into (eligible, skip).
+
+    Skip reasons (checked in order; first match wins):
+      - already_retired — either lesson has retired_at set
+      - already_merged  — either lesson appears in lesson_merges (not reversed)
+    """
+    eligible = []
+    skip = []
+    for r in rows:
+        if r["a_retired"] or r["b_retired"]:
+            skip.append({**r, "reason": "already_retired"})
+        elif r["a_in_merges"] or r["b_in_merges"]:
+            skip.append({**r, "reason": "already_merged"})
+        else:
+            eligible.append(r)
+    return eligible, skip
