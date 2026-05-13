@@ -2,58 +2,194 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make claude-memory a multi-agent shared corpus. Every write is stamped with `source_agent` (family) and `source_client_id`. Owned content (lessons, journal, specs, etc.) is protected by rule-b: only the original author's agent family can modify. Shared metadata (projects, project_state, etc.) remains last-writer-wins. v5 consolidation skips cross-agent pairs at production mutation points. Codex onboards via a new `api_keys` table; Claude's fleet migrates to per-machine tokens.
+**Goal:** Make claude-memory a multi-agent shared corpus. Every write is stamped with `source_agent` (family) and `source_client_id`. Owned content (lessons, patterns, journal, specs/agents/MCP servers, annotations) is protected by rule-b: only the original author's agent family can modify. Shared metadata (projects, project_state, etc.) remains last-writer-wins. v5 consolidation skips cross-agent pairs at log-time and at backlog-apply. Codex onboards via a new `api_keys` table; Claude's fleet migrates to per-machine tokens.
 
-**Architecture:** New `src/identity.py` resolves `(family, client_id, scopes)` per request from one of three auth paths (legacy API_KEY, `api_keys` hash match, OAuth access token). Resolved identity is stored in a `contextvars.ContextVar` for the duration of the request and read by tools via `get_identity()`. Migration `004_v6_attribution.sql` adds new tables and stamps the columns. Tool changes are mechanical: stamp on insert, assert ownership before owned-content updates. Consolidation candidate queries get a `source_agent =` filter; the v5.1 analyzer stays unfiltered with a derived `cross_agent` column.
+**Architecture:** New `src/identity.py` resolves `(family, client_id, scopes)` per request from one of three auth paths (api_keys hash, OAuth access token, legacy API_KEY) and exposes it via a Python `contextvars.ContextVar`. Migration `db/migrations/v6_attribution.sql` adds new tables and stamp columns. Tool changes are mechanical: stamp on insert, assert ownership before owned-content updates. Consolidation candidate queries get `source_agent` filters; the v5.1 analyzer keeps cross-agent pairs but tags them so future investigation has signal.
 
 **Tech Stack:** Python 3.11+, asyncpg, FastMCP, PostgreSQL 16 + pgvector, pytest-asyncio.
 
-**Pre-flight:** The test DB container (`claude_memory_test_db` on slmbeast, port 5434) is currently stopped. Before running tests, start it: `ssh slmbeast 'docker start claude_memory_test_db'`. Schema migrations 001–003 should already be applied to the test DB.
+**Pre-flight:**
+
+- The test DB container (`claude_memory_test_db` on slmbeast, port 5434) is currently stopped. Start it: `ssh slmbeast 'docker start claude_memory_test_db'`.
+- The test DB must have **all prior migrations** applied: `001_add_journal.sql`, `v4_feedback_loop.sql`, `v5_consolidation.sql`, `v5_1_backlog_analysis.sql`, `v5_oauth_persistence.sql`. Tasks below verify this with the schema-introspection test and the seed-row tests.
+- **Subagent caveat:** the plan cites file:line locations as hints, but mechanical edits earlier in a file may shift downstream line numbers. Subagents should `grep` for the surrounding SQL/function name when applying edits, not rely on the exact line numbers as written.
 
 ---
 
 ## File Structure
 
 **New files:**
-- `migrations/004_v6_attribution.sql` — schema migration (api_keys, oauth_client_family, source_agent + source_client_id columns, audit columns, generated cross_agent column on backlog_analysis)
-- `src/identity.py` — identity resolver, ContextVar-backed `get_identity()`, `stamp()`, `assert_can_write()`
+- `db/migrations/v6_attribution.sql` — schema migration (api_keys, oauth_client_family, source_agent + source_client_id columns, audit columns, cross_agent generated + backfill for backlog_analysis)
+- `src/identity.py` — identity resolver, ContextVar-backed `get_identity()`, `set_identity()`, `reset_identity()`, `stamp()`, `assert_can_write()`, `require_admin()`
 - `scripts/issue_api_key.py` — admin CLI to issue tokens
 - `scripts/revoke_api_key.py` — admin CLI to revoke tokens
 - `scripts/list_api_keys.py` — admin CLI to list tokens
+- `tests/test_v6_migration.py` — migration backfill / shape verification
 - `tests/test_identity.py` — resolver branch tests
+- `tests/test_identity_e2e.py` — **spike** + integration: HTTP request → ContextVar → tool handler
 - `tests/test_rule_b.py` — cross-agent write enforcement tests
 - `tests/test_consolidation_cross_agent.py` — cross-agent skip regression tests
-- `tests/test_v6_migration.py` — migration backfill verification
+- `tests/test_admin_scripts.py` — issue_api_key.py end-to-end
 
 **Modified files:**
-- `src/auth.py` — resolver hook in `load_access_token` to populate the ContextVar
-- `src/tools/lessons.py` — stamp on log_lesson/log_pattern/rate_lesson; rule-b on update_lesson/retire_lesson
-- `src/tools/journal.py` — stamp on write_journal
+- `src/auth.py` — resolver hook in `load_access_token` to populate the ContextVar (or switch to Starlette middleware after spike)
+- `src/tools/lessons.py` — stamp on log_lesson/log_pattern; rule-b on update_lesson/retire_lesson; rate_lesson stamps any annotation it creates
+- `src/tools/journal.py` — stamp on write_journal; optional `source_agent` filter param on read_journal
 - `src/tools/specs.py` — stamp on create_spec; rule-b on update_spec/retire_spec
 - `src/tools/agents.py` — stamp on register_agent; rule-b on update_agent/retire_agent
 - `src/tools/mcp_registry.py` — stamp on register_mcp_server/register_mcp_tool; rule-b on update_mcp_server/retire_mcp_server
-- `src/tools/annotations.py` — stamp on annotate; rule-b on clear_annotation
-- `src/tools/projects.py` — stamp on add_project/update_project_state/set_project_claude_md/update_project_claude_md/merge_projects (Pattern 3 + admin scope on merge)
-- `src/tools/infra.py` — stamp on add_machine/add_container/get_permissions writes/add guardrails
-- `src/tools/sessions.py` — stamp on start_session/end_session
-- `src/tools/admin.py` — admin scope precondition on resolve_conflict; add `list_clients` MCP tool
-- `src/tools/consolidation.py` — verify queue tools work cross-family on intra-family pairs (no code change expected, just tests)
-- `src/tools/backlog_apply.py` — `fetch_candidate_rows` adds source_agent filter
-- `src/consolidation/candidates.py` — candidate query adds source_agent filter
-- `src/consolidation/backlog.py` — analyzer remains unfiltered; stamps cross_agent computed column
+- `src/tools/annotations.py` — stamp on annotate; rule-b on clear_annotation; document UPDATE-on-conflict carve-out
+- `src/tools/admin.py` — stamp on add_project/update_project_state; admin scope on merge_projects; add `list_clients` MCP tool
+- `src/tools/consolidation.py` — admin scope on resolve_conflict
+- `src/tools/projects.py` — stamp on set_project_claude_md/update_project_claude_md
+- `src/tools/sessions.py` — stamp on start_session/end_session (including end_session's project_state UPSERT)
+- `src/tools/search.py` — optional `source_agent` filter param on search/search_lessons
+- `src/tools/backlog_apply.py` — `fetch_candidate_rows` adds cross-agent filter (`WHERE ba.left_source_agent = ba.right_source_agent`)
+- `src/consolidation/candidates.py` — `find_candidates` adds **required** `source_agent` parameter
+- `src/consolidation/orchestrator.py` — pass through source_agent to `find_candidates`
+- `src/consolidation/backlog.py` — `generate_pairs` SELECTs `a.source_agent`, `b.source_agent`; `judge_and_record` writes them to `backlog_analysis`
+
+---
+
+## Task 0: Pre-flight + ContextVar Propagation Spike
+
+**Goal:** Confirm that a Python `contextvars.ContextVar` set inside the OAuth provider's `load_access_token` is readable inside an MCP tool handler under FastMCP's `stateless_http=True` request lifecycle. If this works, the simple ContextVar design in subsequent tasks is correct. If it does NOT work, we pivot to a Starlette middleware that attaches identity to `request.state` and adjust Task 5 accordingly.
+
+**Files:**
+- Create: `tests/test_identity_e2e.py`
+
+- [ ] **Step 1: Start the test DB**
+
+```bash
+ssh slmbeast 'docker start claude_memory_test_db'
+sleep 3
+PGPASSWORD=claude psql -h localhost -p 5434 -U claude -d claude_memory_test -c "SELECT 1"
+```
+
+Expected: `?column? \n----------\n        1` (DB reachable).
+
+- [ ] **Step 2: Verify prior migrations are applied**
+
+```bash
+PGPASSWORD=claude psql -h localhost -p 5434 -U claude -d claude_memory_test -c "
+    SELECT table_name FROM information_schema.tables
+    WHERE table_schema='public'
+      AND table_name IN ('lessons','oauth_clients','backlog_analysis','consolidation_runs','lesson_merges','agent_specs','specifications','mcp_servers')
+    ORDER BY table_name;"
+```
+
+Expected: all 8 tables listed. If any are missing, apply the appropriate prior migration from `db/migrations/` before proceeding.
+
+- [ ] **Step 3: Write the spike harness**
+
+Create `tests/test_identity_e2e.py`:
+
+```python
+"""End-to-end identity propagation spike.
+
+Issues a real HTTP request through FastMCP's ASGI app and confirms that
+identity set in load_access_token reaches the tool handler.
+"""
+
+import contextvars
+import os
+
+import httpx
+import pytest
+
+# This contextvar is the simplest possible probe: any propagation failure
+# between middleware and tool handler will show up as a None read.
+_probe: contextvars.ContextVar[str | None] = contextvars.ContextVar("probe", default=None)
+
+
+@pytest.mark.asyncio
+async def test_contextvar_propagates_from_auth_to_tool():
+    """Identity set in load_access_token must be readable inside tool handler."""
+    os.environ["DATABASE_URL"] = os.getenv(
+        "TEST_DATABASE_URL",
+        "postgresql://claude:claude@localhost:5434/claude_memory_test",
+    )
+    os.environ["API_KEY"] = "spike-test-key"
+    os.environ.setdefault("OPENAI_API_KEY", "sk-dummy")
+    os.environ.setdefault("ANTHROPIC_API_KEY", "sk-dummy")
+
+    # Import after env vars set (config reads env at import time).
+    from src.server import app
+    from src import auth as auth_module
+
+    # Wrap load_access_token to set our probe.
+    original = auth_module.MemoryOAuthProvider.load_access_token
+
+    async def patched(self, token):
+        _probe.set(f"saw:{token[:8]}")
+        return await original(self, token)
+
+    auth_module.MemoryOAuthProvider.load_access_token = patched
+
+    # Register a one-shot tool that reads the probe.
+    from src.server import mcp
+
+    @mcp.tool(name="_spike_probe")
+    async def _spike_probe(ctx) -> str:  # noqa: ANN001
+        return _probe.get() or "MISSING"
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        # MCP JSON-RPC tool call
+        resp = await client.post(
+            "/mcp",
+            headers={
+                "Authorization": "Bearer spike-test-key",
+                "Accept": "application/json, text/event-stream",
+                "Content-Type": "application/json",
+            },
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "_spike_probe", "arguments": {}},
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        # Extract the tool's text result (FastMCP wraps it)
+        result_text = body["result"]["content"][0]["text"]
+        assert result_text != "MISSING", (
+            "ContextVar did not propagate from load_access_token into tool handler. "
+            "Plan must switch to Starlette request.state pattern (see Task 5 fallback)."
+        )
+        assert result_text.startswith("saw:"), result_text
+```
+
+- [ ] **Step 4: Run the spike**
+
+Run: `pytest tests/test_identity_e2e.py::test_contextvar_propagates_from_auth_to_tool -v -s`
+Expected outcomes:
+- **PASS:** ContextVar approach is viable. Proceed with Task 1 unchanged.
+- **FAIL ("ContextVar did not propagate"):** Pivot Task 5 to attach identity to `request.state` via a Starlette middleware. The reset of the plan is unaffected; only the wire-up changes. The fallback code is given in Task 5's "Fallback path" section.
+
+- [ ] **Step 5: Commit the spike (regardless of outcome)**
+
+```bash
+git add tests/test_identity_e2e.py
+git commit -m "spike(v6): verify contextvar propagation from auth to tool handler"
+```
+
+Record the outcome in commit-message body: `Spike result: PASS|FAIL`. This decides whether Task 5 uses the ContextVar path or the `request.state` fallback.
 
 ---
 
 ## Task 1: Schema Migration
 
 **Files:**
-- Create: `migrations/004_v6_attribution.sql`
+- Create: `db/migrations/v6_attribution.sql`
 - Create: `tests/test_v6_migration.py`
 
 - [ ] **Step 1: Write the failing test**
 
+Create `tests/test_v6_migration.py`:
+
 ```python
-# tests/test_v6_migration.py
 """Verify v6 migration produces expected schema state."""
 
 import pytest
@@ -61,23 +197,19 @@ import pytest
 
 @pytest.mark.asyncio
 async def test_api_keys_table_exists(db_pool):
-    """api_keys table has expected columns."""
     cols = await db_pool.fetch("""
-        SELECT column_name, data_type, is_nullable
-        FROM information_schema.columns
+        SELECT column_name FROM information_schema.columns
         WHERE table_name = 'api_keys'
-        ORDER BY ordinal_position
     """)
     names = {r["column_name"] for r in cols}
     assert names >= {
         "id", "api_key_hash", "family", "client_name", "label",
-        "scopes", "created_at", "last_seen_at", "revoked_at"
+        "scopes", "created_at", "last_seen_at", "revoked_at",
     }
 
 
 @pytest.mark.asyncio
 async def test_oauth_client_family_table_exists(db_pool):
-    """oauth_client_family table has expected columns."""
     cols = await db_pool.fetch("""
         SELECT column_name FROM information_schema.columns
         WHERE table_name = 'oauth_client_family'
@@ -88,7 +220,6 @@ async def test_oauth_client_family_table_exists(db_pool):
 
 @pytest.mark.asyncio
 async def test_source_agent_on_owned_tables(db_pool):
-    """Every owned-content table has source_agent + source_client_id columns."""
     owned = ["lessons", "patterns", "journal", "agent_specs", "specifications",
              "mcp_servers", "mcp_server_tools", "annotations"]
     for t in owned:
@@ -103,9 +234,9 @@ async def test_source_agent_on_owned_tables(db_pool):
 
 @pytest.mark.asyncio
 async def test_source_agent_on_shared_tables(db_pool):
-    """Every shared-metadata table has source_agent + source_client_id columns."""
     shared = ["projects", "project_state", "approaches", "key_files", "guardrails",
-              "permissions", "project_aliases", "machines", "databases", "containers"]
+              "permissions", "project_aliases", "machines", "databases", "containers",
+              "sessions"]
     for t in shared:
         cols = await db_pool.fetch(
             "SELECT column_name FROM information_schema.columns WHERE table_name = $1",
@@ -116,8 +247,18 @@ async def test_source_agent_on_shared_tables(db_pool):
 
 
 @pytest.mark.asyncio
+async def test_mcp_server_projects_NOT_attributed(db_pool):
+    """Junction table (composite PK, no id) is intentionally NOT given source_agent."""
+    cols = await db_pool.fetch("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'mcp_server_projects'
+    """)
+    names = {r["column_name"] for r in cols}
+    assert "source_agent" not in names
+
+
+@pytest.mark.asyncio
 async def test_backlog_analysis_cross_agent_column(db_pool):
-    """backlog_analysis has cross_agent generated column."""
     cols = await db_pool.fetch("""
         SELECT column_name, is_generated FROM information_schema.columns
         WHERE table_name = 'backlog_analysis' AND column_name = 'cross_agent'
@@ -127,29 +268,41 @@ async def test_backlog_analysis_cross_agent_column(db_pool):
 
 
 @pytest.mark.asyncio
+async def test_backlog_analysis_source_agents_backfilled(db_pool):
+    """Existing backlog_analysis rows have left/right_source_agent populated from lessons."""
+    count_total = await db_pool.fetchval("SELECT COUNT(*) FROM backlog_analysis")
+    if count_total == 0:
+        pytest.skip("No existing backlog_analysis rows to verify backfill against")
+    count_unbackfilled = await db_pool.fetchval(
+        "SELECT COUNT(*) FROM backlog_analysis WHERE left_source_agent IS NULL"
+    )
+    # All pre-v6 rows should be backfilled from lessons.source_agent='claude'
+    assert count_unbackfilled == 0
+
+
+@pytest.mark.asyncio
 async def test_existing_rows_backfilled(db_pool):
-    """All existing rows in owned tables stamped source_agent='claude'."""
     count = await db_pool.fetchval(
         "SELECT COUNT(*) FROM lessons WHERE source_agent IS NULL OR source_agent <> 'claude'"
     )
     assert count == 0
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run tests to verify they fail**
 
 Run: `pytest tests/test_v6_migration.py -v`
-Expected: All tests FAIL with `relation "api_keys" does not exist` or `column "source_agent" does not exist`.
+Expected: all FAIL (`relation "api_keys" does not exist`, etc.).
 
 - [ ] **Step 3: Write the migration**
 
-Create `migrations/004_v6_attribution.sql`:
+Create `db/migrations/v6_attribution.sql`:
 
 ```sql
 -- v6: Multi-agent attribution
--- Adds source_agent + source_client_id to all writeable tables.
--- Creates api_keys (static bearer tokens) and oauth_client_family
--- (DCR family inference).
--- Backfills all existing rows to source_agent='claude'.
+-- Adds source_agent + source_client_id columns to writeable tables.
+-- Creates api_keys (static bearer tokens) and oauth_client_family.
+-- Backfills existing rows to source_agent='claude'.
+-- Adds left/right_source_agent + generated cross_agent column to backlog_analysis.
 
 BEGIN;
 
@@ -181,79 +334,50 @@ CREATE TABLE IF NOT EXISTS oauth_client_family (
 );
 
 -- ============================================
--- Owned content tables: source_agent + source_client_id
+-- Owned content: source_agent + source_client_id + audit fields
 -- ============================================
 
-ALTER TABLE lessons             ADD COLUMN IF NOT EXISTS source_agent     TEXT NOT NULL DEFAULT 'claude';
-ALTER TABLE lessons             ADD COLUMN IF NOT EXISTS source_client_id TEXT;
-ALTER TABLE lessons             ADD COLUMN IF NOT EXISTS retired_by_agent TEXT;
-ALTER TABLE lessons             ADD COLUMN IF NOT EXISTS updated_by_agent TEXT;
+DO $$
+DECLARE t TEXT;
+BEGIN
+    FOREACH t IN ARRAY ARRAY['lessons','patterns','journal','agent_specs',
+                             'specifications','mcp_servers','mcp_server_tools',
+                             'annotations']
+    LOOP
+        EXECUTE format('ALTER TABLE %I ADD COLUMN IF NOT EXISTS source_agent     TEXT NOT NULL DEFAULT ''claude''', t);
+        EXECUTE format('ALTER TABLE %I ADD COLUMN IF NOT EXISTS source_client_id TEXT', t);
+    END LOOP;
+END $$;
 
-ALTER TABLE patterns            ADD COLUMN IF NOT EXISTS source_agent     TEXT NOT NULL DEFAULT 'claude';
-ALTER TABLE patterns            ADD COLUMN IF NOT EXISTS source_client_id TEXT;
-
-ALTER TABLE journal             ADD COLUMN IF NOT EXISTS source_agent     TEXT NOT NULL DEFAULT 'claude';
-ALTER TABLE journal             ADD COLUMN IF NOT EXISTS source_client_id TEXT;
-
-ALTER TABLE agent_specs         ADD COLUMN IF NOT EXISTS source_agent     TEXT NOT NULL DEFAULT 'claude';
-ALTER TABLE agent_specs         ADD COLUMN IF NOT EXISTS source_client_id TEXT;
-ALTER TABLE agent_specs         ADD COLUMN IF NOT EXISTS retired_by_agent TEXT;
-ALTER TABLE agent_specs         ADD COLUMN IF NOT EXISTS updated_by_agent TEXT;
-
-ALTER TABLE specifications      ADD COLUMN IF NOT EXISTS source_agent     TEXT NOT NULL DEFAULT 'claude';
-ALTER TABLE specifications      ADD COLUMN IF NOT EXISTS source_client_id TEXT;
-ALTER TABLE specifications      ADD COLUMN IF NOT EXISTS retired_by_agent TEXT;
-ALTER TABLE specifications      ADD COLUMN IF NOT EXISTS updated_by_agent TEXT;
-
-ALTER TABLE mcp_servers         ADD COLUMN IF NOT EXISTS source_agent     TEXT NOT NULL DEFAULT 'claude';
-ALTER TABLE mcp_servers         ADD COLUMN IF NOT EXISTS source_client_id TEXT;
-ALTER TABLE mcp_servers         ADD COLUMN IF NOT EXISTS retired_by_agent TEXT;
-ALTER TABLE mcp_servers         ADD COLUMN IF NOT EXISTS updated_by_agent TEXT;
-
-ALTER TABLE mcp_server_tools    ADD COLUMN IF NOT EXISTS source_agent     TEXT NOT NULL DEFAULT 'claude';
-ALTER TABLE mcp_server_tools    ADD COLUMN IF NOT EXISTS source_client_id TEXT;
-
-ALTER TABLE annotations         ADD COLUMN IF NOT EXISTS source_agent     TEXT NOT NULL DEFAULT 'claude';
-ALTER TABLE annotations         ADD COLUMN IF NOT EXISTS source_client_id TEXT;
+-- Audit fields (who retired / who updated) on tables that have retire/update tools
+DO $$
+DECLARE t TEXT;
+BEGIN
+    FOREACH t IN ARRAY ARRAY['lessons','agent_specs','specifications','mcp_servers',
+                             'patterns','annotations','journal']
+    LOOP
+        EXECUTE format('ALTER TABLE %I ADD COLUMN IF NOT EXISTS retired_by_agent TEXT', t);
+        EXECUTE format('ALTER TABLE %I ADD COLUMN IF NOT EXISTS updated_by_agent TEXT', t);
+    END LOOP;
+END $$;
 
 -- ============================================
--- Shared metadata tables: source_agent + source_client_id
+-- Shared metadata: source_agent + source_client_id
 -- ============================================
 
-ALTER TABLE projects            ADD COLUMN IF NOT EXISTS source_agent     TEXT NOT NULL DEFAULT 'claude';
-ALTER TABLE projects            ADD COLUMN IF NOT EXISTS source_client_id TEXT;
+DO $$
+DECLARE t TEXT;
+BEGIN
+    FOREACH t IN ARRAY ARRAY['projects','project_state','approaches','key_files',
+                             'guardrails','permissions','project_aliases','machines',
+                             'databases','containers','sessions']
+    LOOP
+        EXECUTE format('ALTER TABLE %I ADD COLUMN IF NOT EXISTS source_agent     TEXT NOT NULL DEFAULT ''claude''', t);
+        EXECUTE format('ALTER TABLE %I ADD COLUMN IF NOT EXISTS source_client_id TEXT', t);
+    END LOOP;
+END $$;
 
-ALTER TABLE project_state       ADD COLUMN IF NOT EXISTS source_agent     TEXT NOT NULL DEFAULT 'claude';
-ALTER TABLE project_state       ADD COLUMN IF NOT EXISTS source_client_id TEXT;
-
-ALTER TABLE approaches          ADD COLUMN IF NOT EXISTS source_agent     TEXT NOT NULL DEFAULT 'claude';
-ALTER TABLE approaches          ADD COLUMN IF NOT EXISTS source_client_id TEXT;
-
-ALTER TABLE key_files           ADD COLUMN IF NOT EXISTS source_agent     TEXT NOT NULL DEFAULT 'claude';
-ALTER TABLE key_files           ADD COLUMN IF NOT EXISTS source_client_id TEXT;
-
-ALTER TABLE guardrails          ADD COLUMN IF NOT EXISTS source_agent     TEXT NOT NULL DEFAULT 'claude';
-ALTER TABLE guardrails          ADD COLUMN IF NOT EXISTS source_client_id TEXT;
-
-ALTER TABLE permissions         ADD COLUMN IF NOT EXISTS source_agent     TEXT NOT NULL DEFAULT 'claude';
-ALTER TABLE permissions         ADD COLUMN IF NOT EXISTS source_client_id TEXT;
-
-ALTER TABLE project_aliases     ADD COLUMN IF NOT EXISTS source_agent     TEXT NOT NULL DEFAULT 'claude';
-ALTER TABLE project_aliases     ADD COLUMN IF NOT EXISTS source_client_id TEXT;
-
-ALTER TABLE machines            ADD COLUMN IF NOT EXISTS source_agent     TEXT NOT NULL DEFAULT 'claude';
-ALTER TABLE machines            ADD COLUMN IF NOT EXISTS source_client_id TEXT;
-
-ALTER TABLE databases           ADD COLUMN IF NOT EXISTS source_agent     TEXT NOT NULL DEFAULT 'claude';
-ALTER TABLE databases           ADD COLUMN IF NOT EXISTS source_client_id TEXT;
-
-ALTER TABLE containers          ADD COLUMN IF NOT EXISTS source_agent     TEXT NOT NULL DEFAULT 'claude';
-ALTER TABLE containers          ADD COLUMN IF NOT EXISTS source_client_id TEXT;
-
-ALTER TABLE mcp_server_projects ADD COLUMN IF NOT EXISTS source_agent     TEXT NOT NULL DEFAULT 'claude';
-ALTER TABLE mcp_server_projects ADD COLUMN IF NOT EXISTS source_client_id TEXT;
-
--- conflicts table (optional, may not exist in all environments)
+-- conflicts table (may not exist in all environments — schema is v5+ only)
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'conflicts') THEN
@@ -262,11 +386,10 @@ BEGIN
     END IF;
 END $$;
 
-ALTER TABLE sessions            ADD COLUMN IF NOT EXISTS source_agent     TEXT NOT NULL DEFAULT 'claude';
-ALTER TABLE sessions            ADD COLUMN IF NOT EXISTS source_client_id TEXT;
+-- Intentionally NOT attributing mcp_server_projects (composite PK, junction).
 
 -- ============================================
--- Audit attribution on consolidation tables
+-- Backlog audit attribution
 -- ============================================
 
 DO $$
@@ -275,9 +398,18 @@ BEGIN
         EXECUTE 'ALTER TABLE consolidation_runs ADD COLUMN IF NOT EXISTS source_agent TEXT';
     END IF;
     IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'backlog_analysis') THEN
-        EXECUTE 'ALTER TABLE backlog_analysis ADD COLUMN IF NOT EXISTS left_source_agent TEXT';
+        EXECUTE 'ALTER TABLE backlog_analysis ADD COLUMN IF NOT EXISTS left_source_agent  TEXT';
         EXECUTE 'ALTER TABLE backlog_analysis ADD COLUMN IF NOT EXISTS right_source_agent TEXT';
-        EXECUTE 'ALTER TABLE backlog_analysis ADD COLUMN IF NOT EXISTS cross_agent BOOLEAN
+        -- Backfill from existing lessons before adding the generated column.
+        EXECUTE 'UPDATE backlog_analysis ba
+                 SET left_source_agent  = la.source_agent,
+                     right_source_agent = lb.source_agent
+                 FROM lessons la, lessons lb
+                 WHERE ba.lesson_a_id = la.id
+                   AND ba.lesson_b_id = lb.id
+                   AND ba.left_source_agent IS NULL';
+        EXECUTE 'ALTER TABLE backlog_analysis
+                 ADD COLUMN IF NOT EXISTS cross_agent BOOLEAN
                  GENERATED ALWAYS AS (left_source_agent IS DISTINCT FROM right_source_agent) STORED';
     END IF;
 END $$;
@@ -288,34 +420,32 @@ COMMIT;
 - [ ] **Step 4: Apply migration to test DB**
 
 ```bash
-ssh slmbeast 'docker start claude_memory_test_db' 2>/dev/null || true
-sleep 2
 PGPASSWORD=claude psql -h localhost -p 5434 -U claude -d claude_memory_test \
-    -f migrations/004_v6_attribution.sql
+    -f db/migrations/v6_attribution.sql
 ```
 
-Expected output: a series of `ALTER TABLE` and `CREATE TABLE` confirmations, ending with `COMMIT`.
+Expected: `BEGIN ... ALTER TABLE ... COMMIT`. Idempotent (uses `IF NOT EXISTS`).
 
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `pytest tests/test_v6_migration.py -v`
-Expected: All 6 tests PASS.
+Expected: all PASS.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add migrations/004_v6_attribution.sql tests/test_v6_migration.py
-git commit -m "feat(v6): add attribution schema migration
+git add db/migrations/v6_attribution.sql tests/test_v6_migration.py
+git commit -m "feat(v6): attribution schema migration
 
-Adds source_agent + source_client_id columns to all writeable
-tables, creates api_keys and oauth_client_family, and adds the
-cross_agent generated column to backlog_analysis. Backfills
-existing rows to source_agent='claude'."
+Adds source_agent + source_client_id to owned and shared tables,
+creates api_keys + oauth_client_family, adds audit attribution to
+backlog_analysis with backfill from lessons.source_agent.
+mcp_server_projects intentionally left unattributed (junction)."
 ```
 
 ---
 
-## Task 2: Identity Resolver — Module Skeleton + Legacy Branch
+## Task 2: Identity Resolver — Skeleton + Legacy Branch
 
 **Files:**
 - Create: `src/identity.py`
@@ -323,28 +453,32 @@ existing rows to source_agent='claude'."
 
 - [ ] **Step 1: Write the failing test**
 
+Create `tests/test_identity.py`:
+
 ```python
-# tests/test_identity.py
-"""Identity resolver tests."""
+"""Identity resolver branch tests."""
 
 import os
-import hashlib
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.identity import resolve_identity, Identity
+from src.identity import (
+    Identity, resolve_identity, get_identity, set_identity, reset_identity,
+)
+
+
+@pytest.fixture(autouse=True)
+def _reset_between_tests():
+    reset_identity()
+    yield
+    reset_identity()
 
 
 @pytest.mark.asyncio
-async def test_legacy_api_key_resolves_to_claude(monkeypatch):
-    """A bearer matching the legacy API_KEY env var resolves to family=claude."""
+async def test_legacy_api_key_resolves_to_claude(db_pool, monkeypatch):
     monkeypatch.setattr("src.identity.LEGACY_API_KEY", "legacy-secret-xyz")
-    pool = MagicMock()
-    pool.fetchrow = AsyncMock(return_value=None)
-    pool.execute = AsyncMock()
 
-    identity = await resolve_identity(pool, "legacy-secret-xyz")
+    identity = await resolve_identity(db_pool, "legacy-secret-xyz")
 
     assert identity is not None
     assert identity.family == "claude"
@@ -354,14 +488,17 @@ async def test_legacy_api_key_resolves_to_claude(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_unknown_bearer_returns_none():
-    """An unrecognized bearer returns None (resolver does not throw)."""
-    pool = MagicMock()
-    pool.fetchrow = AsyncMock(return_value=None)
-
-    identity = await resolve_identity(pool, "definitely-not-a-real-token")
-
+async def test_unknown_bearer_returns_none(db_pool):
+    identity = await resolve_identity(db_pool, "definitely-not-a-real-token")
     assert identity is None
+
+
+def test_set_and_get_and_reset():
+    assert get_identity() is None
+    set_identity(Identity(family="codex", client_id="x", scopes=["read"], source="apikey"))
+    assert get_identity().family == "codex"
+    reset_identity()
+    assert get_identity() is None
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -369,17 +506,18 @@ async def test_unknown_bearer_returns_none():
 Run: `pytest tests/test_identity.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'src.identity'`.
 
-- [ ] **Step 3: Implement the module skeleton + legacy branch**
+- [ ] **Step 3: Implement the module**
 
 Create `src/identity.py`:
 
 ```python
 """Identity resolver for multi-agent attribution.
 
-Maps a request bearer token to an (agent_family, client_id, scopes) triple
-via one of three paths: legacy API_KEY env var, api_keys table hash lookup,
-or OAuth access token. Result is stored in a ContextVar for the duration
-of the request and read by tools via `get_identity()`.
+Maps a request bearer to an Identity(family, client_id, scopes, source) via
+one of three paths: api_keys hash, OAuth access token, or legacy API_KEY env.
+
+Identity is stored in a contextvars.ContextVar so tools read it via
+`get_identity()` without taking it as a parameter.
 """
 
 from __future__ import annotations
@@ -388,6 +526,7 @@ import contextvars
 import hashlib
 import logging
 import os
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -395,8 +534,7 @@ import asyncpg
 
 logger = logging.getLogger(__name__)
 
-# Legacy API_KEY from environment (back-compat path). Module-level so tests
-# can monkeypatch it.
+# Legacy API_KEY (back-compat). Module-level so tests can monkeypatch.
 LEGACY_API_KEY: Optional[str] = os.getenv("API_KEY")
 
 
@@ -404,40 +542,54 @@ LEGACY_API_KEY: Optional[str] = os.getenv("API_KEY")
 class Identity:
     family: str             # 'claude' | 'codex' | 'unknown'
     client_id: str          # 'legacy-api-key' | 'apikey:N' | 'oauth:<client_id>'
-    scopes: list[str]       # ['read', 'write'] or ['read', 'write', 'admin']
+    scopes: list[str]       # ['read', 'write'] or includes 'admin'
     source: str             # 'legacy' | 'apikey' | 'oauth'
 
 
-# Per-request identity. Set by auth.py during load_access_token,
-# read by tools via get_identity().
 _current_identity: contextvars.ContextVar[Optional[Identity]] = contextvars.ContextVar(
     "current_identity", default=None
 )
 
 
 def set_identity(identity: Optional[Identity]) -> contextvars.Token:
-    """Set the current request's identity. Returns a reset token."""
     return _current_identity.set(identity)
 
 
 def get_identity() -> Optional[Identity]:
-    """Return the current request's identity, or None if unauthenticated."""
     return _current_identity.get()
+
+
+def reset_identity() -> None:
+    """Clear the current request's identity. Public for test isolation."""
+    _current_identity.set(None)
 
 
 def _sha256_hex(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
 
+def classify_family_from_name(client_name: Optional[str]) -> str:
+    """Map an OAuth client_name (or api_keys.client_name) to a family."""
+    if not client_name:
+        return "unknown"
+    n = client_name.lower()
+    if n.startswith("claude"):
+        return "claude"
+    if n.startswith("codex"):
+        return "codex"
+    return "unknown"
+
+
 async def resolve_identity(pool: asyncpg.Pool, bearer: str) -> Optional[Identity]:
     """Resolve a bearer to an Identity. Returns None if unrecognized.
 
-    Resolution order:
-    1. Legacy API_KEY env var equality (back-compat path)
-    2. api_keys hash match (future task)
-    3. OAuth access token (future task)
+    Order: api_keys → OAuth → legacy API_KEY. (api_keys/OAuth tried first so a
+    bearer that happens to match BOTH api_keys and legacy is attributed to
+    api_keys for better forensics.)
     """
-    # 1. Legacy API_KEY path
+    # 1. (Future task) api_keys lookup
+    # 2. (Future task) OAuth token lookup
+    # 3. Legacy API_KEY (back-compat)
     if LEGACY_API_KEY and bearer == LEGACY_API_KEY:
         logger.warning(
             "DEPRECATION: legacy API_KEY used as bearer. "
@@ -450,38 +602,39 @@ async def resolve_identity(pool: asyncpg.Pool, bearer: str) -> Optional[Identity
             source="legacy",
         )
 
-    # 2 + 3 added in later tasks.
     return None
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `pytest tests/test_identity.py -v`
-Expected: Both tests PASS.
+Expected: 3 PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/identity.py tests/test_identity.py
-git commit -m "feat(v6): identity resolver skeleton + legacy API_KEY branch"
+git commit -m "feat(v6): identity resolver skeleton + legacy API_KEY branch + contextvar"
 ```
 
 ---
 
-## Task 3: Identity Resolver — `api_keys` Branch
+## Task 3: Resolver — `api_keys` Hash Branch
 
 **Files:**
 - Modify: `src/identity.py`
 - Modify: `tests/test_identity.py`
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing tests**
 
 Append to `tests/test_identity.py`:
 
 ```python
+import hashlib
+
+
 @pytest.mark.asyncio
 async def test_api_keys_hash_match(db_pool):
-    """A bearer whose sha256 matches an api_keys row resolves to that row's family."""
     raw = "test-bearer-aaaaaaaaaaaa"
     h = hashlib.sha256(raw.encode()).hexdigest()
     row = await db_pool.fetchrow(
@@ -491,17 +644,14 @@ async def test_api_keys_hash_match(db_pool):
         h,
     )
     key_id = row["id"]
-
     try:
         identity = await resolve_identity(db_pool, raw)
-
         assert identity is not None
         assert identity.family == "codex"
         assert identity.client_id == f"apikey:{key_id}"
         assert identity.scopes == ["read", "write"]
         assert identity.source == "apikey"
 
-        # Verify last_seen_at was updated
         last_seen = await db_pool.fetchval(
             "SELECT last_seen_at FROM api_keys WHERE id = $1", key_id,
         )
@@ -512,7 +662,6 @@ async def test_api_keys_hash_match(db_pool):
 
 @pytest.mark.asyncio
 async def test_api_keys_revoked_does_not_match(db_pool):
-    """A revoked api_keys row does not resolve."""
     raw = "test-bearer-revoked-bbbb"
     h = hashlib.sha256(raw.encode()).hexdigest()
     row = await db_pool.fetchrow(
@@ -520,18 +669,15 @@ async def test_api_keys_revoked_does_not_match(db_pool):
            VALUES ($1, 'codex', ARRAY['read','write'], NOW()) RETURNING id""",
         h,
     )
-    key_id = row["id"]
-
     try:
         identity = await resolve_identity(db_pool, raw)
         assert identity is None
     finally:
-        await db_pool.execute("DELETE FROM api_keys WHERE id = $1", key_id)
+        await db_pool.execute("DELETE FROM api_keys WHERE id = $1", row["id"])
 
 
 @pytest.mark.asyncio
 async def test_api_keys_admin_scope_preserved(db_pool):
-    """An api_keys row with admin scope returns it in Identity.scopes."""
     raw = "test-bearer-admin-cccc"
     h = hashlib.sha256(raw.encode()).hexdigest()
     row = await db_pool.fetchrow(
@@ -539,27 +685,45 @@ async def test_api_keys_admin_scope_preserved(db_pool):
            VALUES ($1, 'claude', ARRAY['read','write','admin']) RETURNING id""",
         h,
     )
-    key_id = row["id"]
-
     try:
         identity = await resolve_identity(db_pool, raw)
         assert identity is not None
         assert "admin" in identity.scopes
     finally:
-        await db_pool.execute("DELETE FROM api_keys WHERE id = $1", key_id)
+        await db_pool.execute("DELETE FROM api_keys WHERE id = $1", row["id"])
+
+
+@pytest.mark.asyncio
+async def test_api_keys_wins_over_legacy(db_pool, monkeypatch):
+    """A bearer that matches BOTH legacy API_KEY and an api_keys row resolves via api_keys."""
+    raw = "double-match-bearer-dddd"
+    h = hashlib.sha256(raw.encode()).hexdigest()
+    monkeypatch.setattr("src.identity.LEGACY_API_KEY", raw)
+    row = await db_pool.fetchrow(
+        """INSERT INTO api_keys (api_key_hash, family, label, scopes)
+           VALUES ($1, 'codex', 'overlap', ARRAY['read','write']) RETURNING id""",
+        h,
+    )
+    try:
+        identity = await resolve_identity(db_pool, raw)
+        assert identity is not None
+        assert identity.source == "apikey"
+        assert identity.family == "codex"
+    finally:
+        await db_pool.execute("DELETE FROM api_keys WHERE id = $1", row["id"])
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `pytest tests/test_identity.py::test_api_keys_hash_match -v`
-Expected: FAIL — resolve_identity returns None for unknown bearers; api_keys branch not implemented.
+Expected: FAIL (resolver returns None — api_keys branch not yet implemented).
 
 - [ ] **Step 3: Implement the api_keys branch**
 
-Replace the `# 2 + 3 added in later tasks.` comment in `src/identity.py` with:
+In `src/identity.py`, replace the `# 1. (Future task) api_keys lookup` line with:
 
 ```python
-    # 2. api_keys hash lookup
+    # 1. api_keys hash lookup
     bearer_hash = _sha256_hex(bearer)
     row = await pool.fetchrow(
         """SELECT id, family, scopes FROM api_keys
@@ -567,7 +731,8 @@ Replace the `# 2 + 3 added in later tasks.` comment in `src/identity.py` with:
         bearer_hash,
     )
     if row:
-        # Update last_seen_at (fire-and-forget — don't block on this)
+        # Touch last_seen_at. Awaited (one extra round-trip per request) for
+        # simplicity; revisit if it becomes a hot-path bottleneck.
         await pool.execute(
             "UPDATE api_keys SET last_seen_at = NOW() WHERE id = $1",
             row["id"],
@@ -583,57 +748,52 @@ Replace the `# 2 + 3 added in later tasks.` comment in `src/identity.py` with:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `pytest tests/test_identity.py -v`
-Expected: All 5 tests PASS.
+Expected: 7 PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/identity.py tests/test_identity.py
-git commit -m "feat(v6): resolver api_keys hash-match branch"
+git commit -m "feat(v6): resolver api_keys hash-match branch; api_keys precedes legacy"
 ```
 
 ---
 
-## Task 4: Identity Resolver — OAuth Branch
+## Task 4: Resolver — OAuth Branch (with Expiry Check)
 
 **Files:**
 - Modify: `src/identity.py`
 - Modify: `tests/test_identity.py`
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing tests**
 
 Append to `tests/test_identity.py`:
 
 ```python
 @pytest.mark.asyncio
 async def test_oauth_token_resolves_claude_family(db_pool):
-    """An OAuth access token whose client_name starts with 'claude' resolves to family=claude."""
-    # Set up an OAuth client + token directly in the DB
     client_id = "client_test_oauth_claude"
     client_name = "claude-code-test"
-    token = "oauth-test-token-dddd"
+    token = "oauth-test-token-eeee"
 
     await db_pool.execute(
         """INSERT INTO oauth_clients (client_id, client_secret, client_name,
                                        token_endpoint_auth_method, client_id_issued_at, raw_data)
-           VALUES ($1, 'secret', $2, 'none', extract(epoch from NOW())::int, '{}')""",
+           VALUES ($1, 'secret', $2, 'none', extract(epoch from NOW())::bigint, '{}'::jsonb)""",
         client_id, client_name,
     )
     await db_pool.execute(
         """INSERT INTO oauth_access_tokens (token, client_id, scopes, expires_at)
            VALUES ($1, $2, '[]'::jsonb, $3)""",
-        token, client_id, 2**31 - 1,  # far future
+        token, client_id, 2**31 - 1,
     )
-
     try:
         identity = await resolve_identity(db_pool, token)
-
         assert identity is not None
         assert identity.family == "claude"
         assert identity.client_id == f"oauth:{client_id}"
         assert identity.source == "oauth"
 
-        # Verify oauth_client_family row was inserted
         family_row = await db_pool.fetchrow(
             "SELECT family, inferred_from FROM oauth_client_family WHERE client_id = $1",
             client_id,
@@ -648,15 +808,14 @@ async def test_oauth_token_resolves_claude_family(db_pool):
 
 @pytest.mark.asyncio
 async def test_oauth_token_unknown_client_name(db_pool):
-    """An OAuth client with an unrecognized name prefix gets family='unknown'."""
     client_id = "client_test_oauth_unknown"
     client_name = "some-random-app"
-    token = "oauth-test-token-eeee"
+    token = "oauth-test-token-ffff"
 
     await db_pool.execute(
         """INSERT INTO oauth_clients (client_id, client_secret, client_name,
                                        token_endpoint_auth_method, client_id_issued_at, raw_data)
-           VALUES ($1, 'secret', $2, 'none', extract(epoch from NOW())::int, '{}')""",
+           VALUES ($1, 'secret', $2, 'none', extract(epoch from NOW())::bigint, '{}'::jsonb)""",
         client_id, client_name,
     )
     await db_pool.execute(
@@ -664,7 +823,6 @@ async def test_oauth_token_unknown_client_name(db_pool):
            VALUES ($1, $2, '[]'::jsonb, $3)""",
         token, client_id, 2**31 - 1,
     )
-
     try:
         identity = await resolve_identity(db_pool, token)
         assert identity is not None
@@ -673,49 +831,56 @@ async def test_oauth_token_unknown_client_name(db_pool):
         await db_pool.execute("DELETE FROM oauth_client_family WHERE client_id = $1", client_id)
         await db_pool.execute("DELETE FROM oauth_access_tokens WHERE token = $1", token)
         await db_pool.execute("DELETE FROM oauth_clients WHERE client_id = $1", client_id)
+
+
+@pytest.mark.asyncio
+async def test_oauth_expired_token_does_not_resolve(db_pool):
+    """Expired access tokens must NOT set identity, even if the row still exists."""
+    client_id = "client_test_oauth_expired"
+    token = "oauth-test-token-gggg"
+
+    await db_pool.execute(
+        """INSERT INTO oauth_clients (client_id, client_secret, client_name,
+                                       token_endpoint_auth_method, client_id_issued_at, raw_data)
+           VALUES ($1, 'secret', 'claude-code', 'none', extract(epoch from NOW())::bigint, '{}'::jsonb)""",
+        client_id,
+    )
+    await db_pool.execute(
+        """INSERT INTO oauth_access_tokens (token, client_id, scopes, expires_at)
+           VALUES ($1, $2, '[]'::jsonb, $3)""",
+        token, client_id, 1,  # expired
+    )
+    try:
+        identity = await resolve_identity(db_pool, token)
+        assert identity is None
+    finally:
+        await db_pool.execute("DELETE FROM oauth_access_tokens WHERE token = $1", token)
+        await db_pool.execute("DELETE FROM oauth_clients WHERE client_id = $1", client_id)
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `pytest tests/test_identity.py::test_oauth_token_resolves_claude_family -v`
-Expected: FAIL — OAuth branch not implemented.
+Run: `pytest tests/test_identity.py -v -k oauth`
+Expected: all three FAIL.
 
-- [ ] **Step 3: Add a family-prefix classifier**
+- [ ] **Step 3: Implement the OAuth branch**
 
-In `src/identity.py`, add this helper near the top of the file (above `resolve_identity`):
-
-```python
-def classify_family_from_name(client_name: Optional[str]) -> str:
-    """Map an OAuth client_name (or api_keys.client_name) to a family.
-
-    Prefix rules are case-insensitive. Unknown names fall through to 'unknown'.
-    """
-    if not client_name:
-        return "unknown"
-    n = client_name.lower()
-    if n.startswith("claude"):
-        return "claude"
-    if n.startswith("codex"):
-        return "codex"
-    return "unknown"
-```
-
-Then add the OAuth branch after the api_keys branch in `resolve_identity`:
+In `src/identity.py`, replace the `# 2. (Future task) OAuth token lookup` line with:
 
 ```python
-    # 3. OAuth access token lookup
+    # 2. OAuth access token lookup (with expiry filter)
     row = await pool.fetchrow(
         """SELECT t.client_id, c.client_name
            FROM oauth_access_tokens t
            JOIN oauth_clients c ON c.client_id = t.client_id
-           WHERE t.token = $1""",
-        bearer,
+           WHERE t.token = $1
+             AND (t.expires_at IS NULL OR t.expires_at > $2)""",
+        bearer, int(time.time()),
     )
     if row:
         oauth_client_id = row["client_id"]
         client_name = row["client_name"]
 
-        # Look up or insert the family classification
         family_row = await pool.fetchrow(
             "SELECT family FROM oauth_client_family WHERE client_id = $1",
             oauth_client_id,
@@ -734,8 +899,9 @@ Then add the OAuth branch after the api_keys branch in `resolve_identity`:
             if family == "unknown":
                 logger.warning(
                     "Unknown OAuth client classified as 'unknown': "
-                    f"client_id={oauth_client_id} client_name={client_name!r}. "
-                    "Update oauth_client_family.family manually if this is misclassified."
+                    "client_id=%s client_name=%r. Update oauth_client_family.family "
+                    "to a known family if this is misclassified.",
+                    oauth_client_id, client_name,
                 )
 
         return Identity(
@@ -749,13 +915,13 @@ Then add the OAuth branch after the api_keys branch in `resolve_identity`:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `pytest tests/test_identity.py -v`
-Expected: All 7 tests PASS.
+Expected: 10 PASS total.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/identity.py tests/test_identity.py
-git commit -m "feat(v6): resolver OAuth branch + family prefix classifier"
+git commit -m "feat(v6): resolver OAuth branch (with expiry filter) + family prefix classifier"
 ```
 
 ---
@@ -766,28 +932,61 @@ git commit -m "feat(v6): resolver OAuth branch + family prefix classifier"
 - Modify: `src/auth.py`
 - Modify: `tests/test_identity.py`
 
-- [ ] **Step 1: Write the failing integration test**
+**Branch on Task 0 spike outcome:**
+- **PASS (ContextVar works):** use the primary path below.
+- **FAIL (ContextVar does not propagate):** use the "Fallback path" at the end.
+
+### Primary path (ContextVar)
+
+- [ ] **Step 1: Write the failing test**
 
 Append to `tests/test_identity.py`:
 
 ```python
 @pytest.mark.asyncio
-async def test_load_access_token_sets_contextvar(db_pool, monkeypatch):
-    """OAuth provider's load_access_token populates the identity ContextVar."""
+async def test_load_access_token_sets_identity_via_apikey(db_pool, monkeypatch):
+    """An api_keys-issued bearer is accepted by load_access_token AND sets identity."""
     from src.auth import MemoryOAuthProvider
-    from src.identity import get_identity, _current_identity
 
-    # Reset the contextvar before the test
-    _current_identity.set(None)
+    raw = "auth-wire-apikey-hhhh"
+    h = hashlib.sha256(raw.encode()).hexdigest()
+    row = await db_pool.fetchrow(
+        """INSERT INTO api_keys (api_key_hash, family, label, scopes)
+           VALUES ($1, 'codex', 'auth-wire-test', ARRAY['read','write']) RETURNING id""",
+        h,
+    )
+    key_id = row["id"]
 
-    provider = MemoryOAuthProvider(api_key="test-legacy-key")
+    provider = MemoryOAuthProvider(api_key="some-other-legacy")
     provider.set_pool(db_pool)
-    monkeypatch.setattr("src.identity.LEGACY_API_KEY", "test-legacy-key")
+    monkeypatch.setattr("src.identity.LEGACY_API_KEY", "some-other-legacy")
 
-    result = await provider.load_access_token("test-legacy-key")
+    try:
+        result = await provider.load_access_token(raw)
+        assert result is not None
+        assert result.client_id == f"apikey:{key_id}"
 
+        identity = get_identity()
+        assert identity is not None
+        assert identity.family == "codex"
+        assert identity.source == "apikey"
+    finally:
+        await db_pool.execute("DELETE FROM api_keys WHERE id = $1", key_id)
+
+
+@pytest.mark.asyncio
+async def test_load_access_token_legacy_back_compat(db_pool, monkeypatch):
+    """Legacy API_KEY bearer still produces a valid AccessToken AND sets identity."""
+    from src.auth import MemoryOAuthProvider
+
+    provider = MemoryOAuthProvider(api_key="legacy-wire-test-iiii")
+    provider.set_pool(db_pool)
+    monkeypatch.setattr("src.identity.LEGACY_API_KEY", "legacy-wire-test-iiii")
+
+    result = await provider.load_access_token("legacy-wire-test-iiii")
     assert result is not None
-    assert result.client_id == "api-key-user"  # existing back-compat behavior
+    # back-compat: legacy AccessToken client_id stays 'api-key-user'
+    assert result.client_id == "api-key-user"
 
     identity = get_identity()
     assert identity is not None
@@ -795,28 +994,25 @@ async def test_load_access_token_sets_contextvar(db_pool, monkeypatch):
     assert identity.source == "legacy"
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run tests to verify they fail**
 
-Run: `pytest tests/test_identity.py::test_load_access_token_sets_contextvar -v`
-Expected: FAIL — `get_identity()` returns None because the resolver isn't called yet.
+Run: `pytest tests/test_identity.py -v -k load_access_token`
+Expected: both FAIL.
 
-- [ ] **Step 3: Hook resolver into `load_access_token`**
+- [ ] **Step 3: Rewrite `load_access_token`**
 
-Modify `src/auth.py`. Find the `load_access_token` method (around line 250) and replace it with:
+In `src/auth.py`, replace the `load_access_token` method with:
 
 ```python
     async def load_access_token(self, token: str) -> AccessToken | None:
-        """Load an access token and populate the per-request identity ContextVar.
+        """Load an access token AND populate the per-request identity ContextVar.
 
-        The contextvar is read by tools to attribute writes. We populate it
-        here because this method runs early in every authenticated request.
+        Resolves identity for stamping regardless of which auth path matched.
+        Failure to resolve identity is non-fatal — the access-token check
+        below is what gates the request.
         """
-        from src.identity import resolve_identity, set_identity
+        from src.identity import resolve_identity, set_identity, get_identity
 
-        logger.info(f"load_access_token called, is_api_key={token == self.api_key}, token_prefix={token[:8]}...")
-
-        # Resolve identity for stamping. Failure here is non-fatal —
-        # the access-token check below is what gates the request.
         try:
             identity = await resolve_identity(self.pool, token)
             if identity is not None:
@@ -824,7 +1020,18 @@ Modify `src/auth.py`. Find the `load_access_token` method (around line 250) and 
         except Exception as e:
             logger.error(f"Identity resolution failed (non-fatal): {e}")
 
-        # Backward compatibility: accept the raw API key as a bearer token
+        # api_keys-issued bearers are valid even though they aren't in
+        # oauth_access_tokens. The resolver has already validated them.
+        identity = get_identity()
+        if identity is not None and identity.source == "apikey":
+            return AccessToken(
+                token=token,
+                client_id=identity.client_id,
+                scopes=identity.scopes,
+                expires_at=None,
+            )
+
+        # Legacy API_KEY back-compat (preserves existing client_id="api-key-user")
         if token == self.api_key:
             return AccessToken(
                 token=token,
@@ -833,7 +1040,7 @@ Modify `src/auth.py`. Find the `load_access_token` method (around line 250) and 
                 expires_at=None,
             )
 
-        # Check database for OAuth-issued access tokens
+        # OAuth-issued access tokens
         row = await self.pool.fetchrow(
             "SELECT client_id, scopes, expires_at, resource FROM oauth_access_tokens WHERE token = $1",
             token,
@@ -849,62 +1056,59 @@ Modify `src/auth.py`. Find the `load_access_token` method (around line 250) and 
         return None
 ```
 
-Note: a bearer that resolves via the **api_keys** path is NOT a valid OAuth access token, so this method will return `None` for those — which would block the request. Need a second branch:
-
-After the OAuth row lookup, before the final `return None`, add:
-
-```python
-        # api_keys-issued bearer (resolver already validated it via set_identity).
-        # If identity is set with source='apikey', accept the token.
-        from src.identity import get_identity
-        identity = get_identity()
-        if identity is not None and identity.source == "apikey":
-            return AccessToken(
-                token=token,
-                client_id=identity.client_id,
-                scopes=identity.scopes,
-                expires_at=None,
-            )
-
-        return None
-```
-
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `pytest tests/test_identity.py -v`
-Expected: All 8 tests PASS.
+Expected: 12 PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/auth.py tests/test_identity.py
-git commit -m "feat(v6): wire identity resolver into OAuth provider auth layer"
+git commit -m "feat(v6): wire identity resolver into OAuth provider load_access_token"
 ```
+
+### Fallback path (Starlette `request.state`, only if spike failed)
+
+If Task 0's spike failed, replace ContextVar with request-scoped state:
+
+- Add a thin Starlette middleware that runs after `AuthenticationMiddleware`. It reads `request.user` (the AccessToken set by bearer_auth middleware), looks up identity by `client_id` from a small in-memory cache populated by `load_access_token`, and attaches `request.state.identity`.
+- Change `get_identity()` to take a `request` argument: `get_identity(request) -> Optional[Identity]`. Inside tools, retrieve via `ctx.request_context.request.state.identity`.
+- Update all subsequent task code that calls `get_identity()` / `stamp()` to take `ctx` and resolve from request state.
+
+Detailed implementation deferred until the spike result is known; the structural change is small but pervasive enough to fork the rest of the plan. **If you reach this point, stop and re-plan Task 6 onwards with the request-state pattern before continuing.**
 
 ---
 
-## Task 6: Write-Stamp + Rule-B Helpers
+## Task 6: Write-Stamp + Rule-B + Admin Helpers
 
 **Files:**
 - Modify: `src/identity.py`
 - Create: `tests/test_rule_b.py`
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing tests**
 
 Create `tests/test_rule_b.py`:
 
 ```python
-"""Tests for stamp() and assert_can_write() helpers."""
+"""Tests for stamp(), assert_can_write(), require_admin()."""
 
 import pytest
 
 from src.identity import (
-    Identity, set_identity, stamp, assert_can_write,
+    Identity, set_identity, reset_identity,
+    stamp, assert_can_write, require_admin,
 )
 
 
-@pytest.mark.asyncio
-async def test_stamp_returns_current_identity():
+@pytest.fixture(autouse=True)
+def _reset_between():
+    reset_identity()
+    yield
+    reset_identity()
+
+
+def test_stamp_returns_current_identity():
     set_identity(Identity(
         family="codex", client_id="apikey:42",
         scopes=["read", "write"], source="apikey",
@@ -914,101 +1118,100 @@ async def test_stamp_returns_current_identity():
     assert client_id == "apikey:42"
 
 
-@pytest.mark.asyncio
-async def test_stamp_returns_defaults_when_unauth():
-    set_identity(None)
+def test_stamp_defaults_when_unauth():
     family, client_id = stamp()
-    # Default to claude for back-compat when no identity is set
     assert family == "claude"
     assert client_id is None
 
 
 @pytest.mark.asyncio
 async def test_assert_can_write_allows_own_row(db_pool):
-    """An agent can update a row it owns."""
     row = await db_pool.fetchrow(
         """INSERT INTO lessons (title, content, source_agent)
-           VALUES ('rule-b own-row test', 'content', 'codex')
-           RETURNING id""",
+           VALUES ('rule-b own', 'c', 'codex') RETURNING id""",
     )
-    lesson_id = row["id"]
     try:
         set_identity(Identity(
             family="codex", client_id="apikey:99",
             scopes=["read", "write"], source="apikey",
         ))
-        # Should NOT raise
-        await assert_can_write(db_pool, "lessons", lesson_id)
+        await assert_can_write(db_pool, "lessons", row["id"])
     finally:
-        await db_pool.execute("DELETE FROM lessons WHERE id = $1", lesson_id)
+        await db_pool.execute("DELETE FROM lessons WHERE id = $1", row["id"])
 
 
 @pytest.mark.asyncio
 async def test_assert_can_write_blocks_foreign_row(db_pool):
-    """An agent cannot update a row owned by a different family."""
     row = await db_pool.fetchrow(
         """INSERT INTO lessons (title, content, source_agent)
-           VALUES ('rule-b foreign-row test', 'content', 'claude')
-           RETURNING id""",
+           VALUES ('rule-b foreign', 'c', 'claude') RETURNING id""",
     )
-    lesson_id = row["id"]
     try:
         set_identity(Identity(
             family="codex", client_id="apikey:99",
             scopes=["read", "write"], source="apikey",
         ))
         with pytest.raises(PermissionError) as exc:
-            await assert_can_write(db_pool, "lessons", lesson_id)
+            await assert_can_write(db_pool, "lessons", row["id"])
         assert "codex" in str(exc.value)
         assert "claude" in str(exc.value)
     finally:
-        await db_pool.execute("DELETE FROM lessons WHERE id = $1", lesson_id)
+        await db_pool.execute("DELETE FROM lessons WHERE id = $1", row["id"])
 
 
 @pytest.mark.asyncio
-async def test_assert_can_write_shared_metadata_table_always_allows(db_pool):
-    """Tables in the shared-metadata set always allow writes (last-writer-wins)."""
-    # projects is a shared-metadata table
+async def test_assert_can_write_shared_metadata_always_allows(db_pool):
     row = await db_pool.fetchrow(
         """INSERT INTO projects (name, source_agent)
-           VALUES ('rule-b-shared-test', 'claude')
-           RETURNING id""",
+           VALUES ('rule-b-shared', 'claude') RETURNING id""",
     )
-    project_id = row["id"]
     try:
         set_identity(Identity(
             family="codex", client_id="apikey:99",
             scopes=["read", "write"], source="apikey",
         ))
-        # Should NOT raise (projects is shared)
-        await assert_can_write(db_pool, "projects", project_id)
+        await assert_can_write(db_pool, "projects", row["id"])
     finally:
-        await db_pool.execute("DELETE FROM projects WHERE id = $1", project_id)
+        await db_pool.execute("DELETE FROM projects WHERE id = $1", row["id"])
 
 
 @pytest.mark.asyncio
-async def test_assert_can_write_admin_scope_bypasses_rule_b(db_pool):
-    """An identity with 'admin' scope can modify any row regardless of family."""
+async def test_assert_can_write_admin_bypass(db_pool):
     row = await db_pool.fetchrow(
         """INSERT INTO lessons (title, content, source_agent)
-           VALUES ('rule-b admin-bypass test', 'content', 'claude')
-           RETURNING id""",
+           VALUES ('rule-b admin', 'c', 'claude') RETURNING id""",
     )
-    lesson_id = row["id"]
     try:
         set_identity(Identity(
             family="codex", client_id="apikey:99",
             scopes=["read", "write", "admin"], source="apikey",
         ))
-        await assert_can_write(db_pool, "lessons", lesson_id)
+        await assert_can_write(db_pool, "lessons", row["id"])
     finally:
-        await db_pool.execute("DELETE FROM lessons WHERE id = $1", lesson_id)
+        await db_pool.execute("DELETE FROM lessons WHERE id = $1", row["id"])
+
+
+def test_require_admin_blocks_non_admin():
+    set_identity(Identity(
+        family="codex", client_id="apikey:99",
+        scopes=["read", "write"], source="apikey",
+    ))
+    with pytest.raises(PermissionError):
+        require_admin()
+
+
+def test_require_admin_passes_when_admin():
+    set_identity(Identity(
+        family="codex", client_id="apikey:99",
+        scopes=["read", "write", "admin"], source="apikey",
+    ))
+    require_admin()
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `pytest tests/test_rule_b.py -v`
-Expected: FAIL with `ImportError: cannot import name 'stamp'` (and `assert_can_write`).
+Expected: FAIL — `ImportError: cannot import name 'stamp'`.
 
 - [ ] **Step 3: Implement the helpers**
 
@@ -1016,10 +1219,10 @@ Append to `src/identity.py`:
 
 ```python
 # ---------------------------------------------------------------------------
-# Write-stamp + Rule-B Helpers
+# Write-stamp + rule-b + admin
 # ---------------------------------------------------------------------------
 
-# Tables where rule b (own-content) applies.
+# Tables with `id` PK + source_agent where rule b applies.
 OWNED_CONTENT_TABLES = frozenset({
     "lessons",
     "patterns",
@@ -1031,7 +1234,7 @@ OWNED_CONTENT_TABLES = frozenset({
     "annotations",
 })
 
-# Tables where last-writer-wins applies (no rule-b enforcement).
+# Tables with `id` PK + source_agent where last-writer-wins.
 SHARED_METADATA_TABLES = frozenset({
     "projects",
     "project_state",
@@ -1044,7 +1247,6 @@ SHARED_METADATA_TABLES = frozenset({
     "databases",
     "containers",
     "conflicts",
-    "mcp_server_projects",
     "sessions",
 })
 
@@ -1052,8 +1254,8 @@ SHARED_METADATA_TABLES = frozenset({
 def stamp() -> tuple[str, Optional[str]]:
     """Return (source_agent, source_client_id) for the current request.
 
-    Defaults to ('claude', None) when no identity is set — back-compat
-    for any code path not yet covered by the resolver.
+    Defaults to ('claude', None) when unauth — preserves legacy behavior for
+    any code path not yet behind the resolver.
     """
     identity = get_identity()
     if identity is None:
@@ -1062,15 +1264,9 @@ def stamp() -> tuple[str, Optional[str]]:
 
 
 async def assert_can_write(pool: asyncpg.Pool, table: str, row_id: int) -> None:
-    """Raise PermissionError if the current identity cannot write to `table.row_id`.
-
-    - Shared-metadata tables always allow writes.
-    - Owned-content tables: only the original source_agent's family can modify.
-    - Identities with 'admin' scope bypass rule b.
-    """
+    """Raise PermissionError if the current identity cannot write to `table.row_id`."""
     if table in SHARED_METADATA_TABLES:
         return
-
     if table not in OWNED_CONTENT_TABLES:
         raise ValueError(
             f"assert_can_write called with unknown table '{table}'. "
@@ -1084,80 +1280,93 @@ async def assert_can_write(pool: asyncpg.Pool, table: str, row_id: int) -> None:
     if "admin" in current_scopes:
         return
 
+    # All OWNED_CONTENT_TABLES have a SERIAL PK `id` column. Table name is
+    # allow-listed above, so f-string interpolation is safe.
     row = await pool.fetchrow(
-        f"SELECT source_agent FROM {table} WHERE id = $1",  # noqa: S608 (table is allow-listed)
+        f"SELECT source_agent FROM {table} WHERE id = $1",
         row_id,
     )
     if row is None:
-        return  # Let the caller handle missing rows
+        return  # caller handles missing row
     owner = row["source_agent"]
-
     if owner != current_family:
         raise PermissionError(
             f"agent '{current_family}' cannot modify row owned by '{owner}' in {table}"
+        )
+
+
+def require_admin() -> None:
+    """Raise PermissionError if the current identity lacks 'admin' scope."""
+    identity = get_identity()
+    scopes = identity.scopes if identity else ["read", "write"]
+    if "admin" not in scopes:
+        family = identity.family if identity else "claude"
+        raise PermissionError(
+            f"agent '{family}' lacks 'admin' scope required for this operation"
         )
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `pytest tests/test_rule_b.py -v`
-Expected: All 6 tests PASS.
+Expected: 8 PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/identity.py tests/test_rule_b.py
-git commit -m "feat(v6): stamp() and assert_can_write() helpers with rule-b semantics"
+git commit -m "feat(v6): stamp/assert_can_write/require_admin helpers"
 ```
 
 ---
 
-## Task 7: Stamp Owned-Content Inserts — Lessons + Patterns + Rate
+## Task 7: Stamp Inserts — `log_lesson`, `log_pattern`, `write_journal`
 
 **Files:**
-- Modify: `src/tools/lessons.py`
+- Modify: `src/tools/lessons.py`, `src/tools/journal.py`
 - Modify: `tests/test_rule_b.py`
 
-- [ ] **Step 1: Write the failing test**
+**Important:** `rate_lesson` operates on Claude lessons from any agent (votes are not ownership). It must NOT call `assert_can_write` and must continue to work cross-agent. The annotation it appends *does* need stamping.
+
+- [ ] **Step 1: Write the failing tests**
 
 Append to `tests/test_rule_b.py`:
 
 ```python
-@pytest.mark.asyncio
-async def test_log_lesson_stamps_source_agent(db_pool, mock_openai, mock_anthropic):
-    """log_lesson stamps source_agent + source_client_id from current identity."""
-    from src.tools.lessons import log_lesson
-    from src.server import AppContext
-    from unittest.mock import MagicMock
+from unittest.mock import MagicMock
+import json as _json
 
+from src.server import AppContext
+
+
+def _ctx(db_pool, mock_openai=None, mock_anthropic=None):
+    ctx = MagicMock()
+    ctx.request_context.lifespan_context = AppContext(
+        db=db_pool,
+        openai=mock_openai or MagicMock(),
+        anthropic=mock_anthropic or MagicMock(),
+    )
+    return ctx
+
+
+def _codex():
     set_identity(Identity(
         family="codex", client_id="apikey:7",
         scopes=["read", "write"], source="apikey",
     ))
 
-    ctx = MagicMock()
-    ctx.request_context.lifespan_context = AppContext(
-        db=db_pool, openai=mock_openai, anthropic=mock_anthropic,
-    )
 
+@pytest.mark.asyncio
+async def test_log_lesson_stamps_codex(db_pool, mock_openai, mock_anthropic):
+    from src.tools.lessons import log_lesson
+    _codex()
+    await db_pool.execute("DELETE FROM lessons WHERE title = $1", "v6-stamp-lesson")
     result = await log_lesson(
-        title="rule-b stamp test lesson",
+        title="v6-stamp-lesson",
         content="stamped by codex",
-        ctx=ctx,
+        ctx=_ctx(db_pool, mock_openai, mock_anthropic),
     )
-
-    import json as _json
     payload = _json.loads(result)
-    if not payload.get("success", True):
-        # If duplicate title, clean up the existing row and retry
-        await db_pool.execute("DELETE FROM lessons WHERE title = $1", "rule-b stamp test lesson")
-        result = await log_lesson(
-            title="rule-b stamp test lesson",
-            content="stamped by codex",
-            ctx=ctx,
-        )
-        payload = _json.loads(result)
-
     lesson_id = payload["lesson_id"]
     try:
         row = await db_pool.fetchrow(
@@ -1168,21 +1377,82 @@ async def test_log_lesson_stamps_source_agent(db_pool, mock_openai, mock_anthrop
         assert row["source_client_id"] == "apikey:7"
     finally:
         await db_pool.execute("DELETE FROM lessons WHERE id = $1", lesson_id)
+
+
+@pytest.mark.asyncio
+async def test_log_pattern_stamps_codex(db_pool, mock_openai):
+    from src.tools.lessons import log_pattern
+    _codex()
+    await db_pool.execute("DELETE FROM patterns WHERE name = $1", "v6-stamp-pattern")
+    result = await log_pattern(
+        name="v6-stamp-pattern",
+        problem="p", solution="s",
+        ctx=_ctx(db_pool, mock_openai),
+    )
+    payload = _json.loads(result)
+    pat_id = payload["pattern_id"]
+    try:
+        row = await db_pool.fetchrow(
+            "SELECT source_agent FROM patterns WHERE id = $1", pat_id,
+        )
+        assert row["source_agent"] == "codex"
+    finally:
+        await db_pool.execute("DELETE FROM patterns WHERE id = $1", pat_id)
+
+
+@pytest.mark.asyncio
+async def test_write_journal_stamps_codex(db_pool, mock_openai):
+    from src.tools.journal import write_journal
+    _codex()
+    result = await write_journal(
+        content="codex first journal", tags=["v6"],
+        ctx=_ctx(db_pool, mock_openai),
+    )
+    payload = _json.loads(result)
+    eid = payload["entry_id"]
+    try:
+        row = await db_pool.fetchrow(
+            "SELECT source_agent, source_client_id FROM journal WHERE id = $1", eid,
+        )
+        assert row["source_agent"] == "codex"
+        assert row["source_client_id"] == "apikey:7"
+    finally:
+        await db_pool.execute("DELETE FROM journal WHERE id = $1", eid)
+
+
+@pytest.mark.asyncio
+async def test_rate_lesson_cross_agent_allowed(db_pool):
+    """codex can rate a claude lesson (votes aren't ownership)."""
+    from src.tools.lessons import rate_lesson
+    row = await db_pool.fetchrow(
+        """INSERT INTO lessons (title, content, source_agent)
+           VALUES ('v6-rate-x-agent', 'c', 'claude') RETURNING id""",
+    )
+    lesson_id = row["id"]
+    _codex()
+    try:
+        result = await rate_lesson(
+            lesson_id=lesson_id, rating="up", ctx=_ctx(db_pool),
+        )
+        payload = _json.loads(result)
+        assert payload.get("success") is True
+    finally:
+        await db_pool.execute("DELETE FROM lessons WHERE id = $1", lesson_id)
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run tests to verify they fail**
 
-Run: `pytest tests/test_rule_b.py::test_log_lesson_stamps_source_agent -v`
-Expected: FAIL — `source_agent` is `'claude'` (default) instead of `'codex'`.
+Run: `pytest tests/test_rule_b.py -v -k "stamp or rate_lesson_cross"`
+Expected: stamping tests FAIL (source_agent='claude' default). `rate_lesson_cross` likely passes today (no rule-b yet) — it's a guard test for later tasks.
 
-- [ ] **Step 3: Modify `log_lesson` to stamp**
+- [ ] **Step 3: Modify `log_lesson`**
 
-In `src/tools/lessons.py`, find the INSERT in `log_lesson` (around line 56) and update both the SQL and the parameters:
+In `src/tools/lessons.py`, locate the `INSERT INTO lessons (...)` block in `log_lesson` (grep for `INSERT INTO lessons`). Replace with:
 
 ```python
-    # Insert lesson
     from src.identity import stamp
     source_agent, source_client_id = stamp()
+
     row = await app.db.fetchrow(
         """
         INSERT INTO lessons (title, content, project_id, tags, severity, embedding,
@@ -1195,215 +1465,172 @@ In `src/tools/lessons.py`, find the INSERT in `log_lesson` (around line 56) and 
     )
 ```
 
-- [ ] **Step 4: Repeat for `log_pattern`**
+- [ ] **Step 4: Modify `log_pattern`**
 
-In the same file, find `log_pattern`'s INSERT. Apply the same pattern: `stamp()` call, add `source_agent` and `source_client_id` columns + parameters.
+In the same file, locate the `log_pattern` INSERT and apply the same pattern: import `stamp`, add `source_agent`/`source_client_id` columns + params.
 
-- [ ] **Step 5: Repeat for `rate_lesson`**
+- [ ] **Step 5: Modify `write_journal`**
 
-`rate_lesson` increments counters on the existing row, so it doesn't create a row. But the rating itself is the user's act of rating — if ratings are stored in a separate `lesson_ratings` table, add stamping to the INSERT there. **Check first:** `grep -n "rate_lesson\|lesson_ratings" src/tools/lessons.py` — if it's just an UPDATE on counters, no stamping change is needed (the lesson's source_agent never changes from rating).
-
-If a separate `lesson_ratings` table exists with its own INSERT, add `source_agent, source_client_id` columns to it via a new migration step `004b_lesson_ratings_attribution.sql` and stamp the INSERT.
+In `src/tools/journal.py`, locate the INSERT INTO journal block. Apply the same pattern.
 
 - [ ] **Step 6: Run tests to verify they pass**
 
 Run: `pytest tests/test_rule_b.py -v`
-Expected: All previous tests + the new stamp test PASS.
+Expected: all current tests PASS.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/tools/lessons.py tests/test_rule_b.py
-git commit -m "feat(v6): stamp source_agent on log_lesson + log_pattern inserts"
+git add src/tools/lessons.py src/tools/journal.py tests/test_rule_b.py
+git commit -m "feat(v6): stamp source_agent on log_lesson/log_pattern/write_journal"
 ```
 
 ---
 
-## Task 8: Stamp Owned-Content Inserts — Journal
-
-**Files:**
-- Modify: `src/tools/journal.py`
-- Modify: `tests/test_rule_b.py`
-
-- [ ] **Step 1: Write the failing test**
-
-Append to `tests/test_rule_b.py`:
-
-```python
-@pytest.mark.asyncio
-async def test_write_journal_stamps_source_agent(db_pool, mock_openai):
-    """write_journal stamps source_agent + source_client_id."""
-    from src.tools.journal import write_journal
-    from src.server import AppContext
-    from unittest.mock import MagicMock
-
-    set_identity(Identity(
-        family="codex", client_id="apikey:7",
-        scopes=["read", "write"], source="apikey",
-    ))
-
-    ctx = MagicMock()
-    ctx.request_context.lifespan_context = AppContext(
-        db=db_pool, openai=mock_openai, anthropic=MagicMock(),
-    )
-
-    import json as _json
-    result = await write_journal(
-        content="codex's first journal entry",
-        tags=["test", "v6"],
-        ctx=ctx,
-    )
-    payload = _json.loads(result)
-    entry_id = payload["entry_id"]
-    try:
-        row = await db_pool.fetchrow(
-            "SELECT source_agent, source_client_id FROM journal WHERE id = $1",
-            entry_id,
-        )
-        assert row["source_agent"] == "codex"
-        assert row["source_client_id"] == "apikey:7"
-    finally:
-        await db_pool.execute("DELETE FROM journal WHERE id = $1", entry_id)
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `pytest tests/test_rule_b.py::test_write_journal_stamps_source_agent -v`
-Expected: FAIL — source_agent defaults to 'claude'.
-
-- [ ] **Step 3: Modify `write_journal` to stamp**
-
-In `src/tools/journal.py`, locate the INSERT INTO journal. Add the stamp call and extend the SQL/params:
-
-```python
-from src.identity import stamp
-source_agent, source_client_id = stamp()
-row = await app.db.fetchrow(
-    """INSERT INTO journal (content, tags, mood, project_id, session_id, embedding,
-                            source_agent, source_client_id)
-       VALUES ($1, $2, $3, $4, $5, $6::vector, $7, $8)
-       RETURNING id""",
-    content, tags or [], mood, project_id, session_id, embedding_str,
-    source_agent, source_client_id,
-)
-```
-
-(Adjust parameter positions to match the actual existing INSERT — the principle is "add two columns, two params, two values".)
-
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `pytest tests/test_rule_b.py::test_write_journal_stamps_source_agent -v`
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/tools/journal.py tests/test_rule_b.py
-git commit -m "feat(v6): stamp source_agent on write_journal"
-```
-
----
-
-## Task 9: Stamp Owned-Content Inserts — Specs, Agents, MCP Registry, Annotations
+## Task 8: Stamp Inserts — Specs, Agents, MCP Registry, Annotations
 
 **Files:**
 - Modify: `src/tools/specs.py`, `src/tools/agents.py`, `src/tools/mcp_registry.py`, `src/tools/annotations.py`
 - Modify: `tests/test_rule_b.py`
 
-This is a multi-file mechanical pass. Each tool follows the same pattern as `log_lesson` / `write_journal`.
+The signatures (verified from source):
 
-- [ ] **Step 1: Write a parameterized failing test**
+- `create_spec(title, content, summary, project, subsystem=None, format_hints=None, triggers=None, ctx=None)` — `project` is **required** and must already exist.
+- `register_agent(name, description, spec_content, summary=None, model='sonnet', triggers=None, tools=None, project=None, ctx=None)`.
+- `register_mcp_server(name, description, transport, url=None, machine=None, auth_type='none', auth_hint=None, config_snippet=None, limitations=None, projects=None, ctx=None)`.
+- `register_mcp_tool(name, server, description, ...)` — confirm signature inline.
+- `annotate(entity_type, entity_id, note, ctx=None)` — UPDATE-on-conflict for the same `(entity_type, entity_id)`; first writer's `source_agent` stays.
+
+- [ ] **Step 1: Write the failing tests**
 
 Append to `tests/test_rule_b.py`:
 
 ```python
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tool_module,tool_name,setup_call,table,extract_id", [
-    (
-        "src.tools.specs", "create_spec",
-        {"name": "v6-test-spec", "title": "T", "content": "C", "project": None, "subsystem": None},
-        "specifications", lambda p: p["spec_id"],
-    ),
-    (
-        "src.tools.agents", "register_agent",
-        {"name": "v6-test-agent", "title": "T", "content": "C", "subsystem": None,
-         "use_when": None, "key_responsibilities": None},
-        "agent_specs", lambda p: p["agent_id"],
-    ),
-    (
-        "src.tools.mcp_registry", "register_mcp_server",
-        {"name": "v6-test-mcp", "description": "D", "transport": "stdio",
-         "command": "x", "config_example": None, "homepage_url": None},
-        "mcp_servers", lambda p: p["server_id"],
-    ),
-    (
-        "src.tools.annotations", "annotate",
-        {"entity_type": "lesson", "entity_id": 1, "note": "v6-test-anno", "tags": None},
-        "annotations", lambda p: p["annotation_id"],
-    ),
-])
-async def test_owned_inserts_stamp_source_agent(
-    db_pool, mock_openai, mock_anthropic, tool_module, tool_name, setup_call, table, extract_id,
-):
-    """Each Pattern-1 insert tool stamps source_agent + source_client_id."""
-    import importlib
-    from src.server import AppContext
-    from unittest.mock import MagicMock
-    import json as _json
-
-    mod = importlib.import_module(tool_module)
-    tool = getattr(mod, tool_name)
-
-    set_identity(Identity(
-        family="codex", client_id="apikey:7",
-        scopes=["read", "write"], source="apikey",
-    ))
-    ctx = MagicMock()
-    ctx.request_context.lifespan_context = AppContext(
-        db=db_pool, openai=mock_openai, anthropic=mock_anthropic,
+async def test_create_spec_stamps_codex(db_pool, mock_openai):
+    from src.tools.specs import create_spec
+    # Seed a project for the spec to attach to
+    proj = await db_pool.fetchrow(
+        "INSERT INTO projects (name) VALUES ('v6-spec-proj') RETURNING id",
     )
+    _codex()
+    try:
+        result = await create_spec(
+            title="v6-stamp-spec",
+            content="C", summary="S",
+            project="v6-spec-proj",
+            ctx=_ctx(db_pool, mock_openai),
+        )
+        payload = _json.loads(result)
+        spec_id = payload["spec_id"]
+        try:
+            row = await db_pool.fetchrow(
+                "SELECT source_agent FROM specifications WHERE id = $1", spec_id,
+            )
+            assert row["source_agent"] == "codex"
+        finally:
+            await db_pool.execute("DELETE FROM specifications WHERE id = $1", spec_id)
+    finally:
+        await db_pool.execute("DELETE FROM projects WHERE id = $1", proj["id"])
 
-    # Annotations need an entity to attach to — ensure a lesson exists with id=1
-    if tool_name == "annotate":
-        existing = await db_pool.fetchval("SELECT id FROM lessons ORDER BY id LIMIT 1")
-        setup_call["entity_id"] = existing or 1
 
-    result = await tool(ctx=ctx, **setup_call)
+@pytest.mark.asyncio
+async def test_register_agent_stamps_codex(db_pool, mock_openai):
+    from src.tools.agents import register_agent
+    _codex()
+    result = await register_agent(
+        name="v6-stamp-agent",
+        description="D",
+        spec_content="C",
+        summary="S",
+        ctx=_ctx(db_pool, mock_openai),
+    )
     payload = _json.loads(result)
-    row_id = extract_id(payload)
+    aid = payload["agent_id"]
     try:
         row = await db_pool.fetchrow(
-            f"SELECT source_agent, source_client_id FROM {table} WHERE id = $1",
-            row_id,
+            "SELECT source_agent FROM agent_specs WHERE id = $1", aid,
         )
         assert row["source_agent"] == "codex"
-        assert row["source_client_id"] == "apikey:7"
     finally:
-        await db_pool.execute(f"DELETE FROM {table} WHERE id = $1", row_id)
+        await db_pool.execute("DELETE FROM agent_specs WHERE id = $1", aid)
+
+
+@pytest.mark.asyncio
+async def test_register_mcp_server_stamps_codex(db_pool, mock_openai):
+    from src.tools.mcp_registry import register_mcp_server
+    _codex()
+    result = await register_mcp_server(
+        name="v6-stamp-mcp",
+        description="D",
+        transport="stdio",
+        ctx=_ctx(db_pool, mock_openai),
+    )
+    payload = _json.loads(result)
+    sid = payload["server_id"]
+    try:
+        row = await db_pool.fetchrow(
+            "SELECT source_agent FROM mcp_servers WHERE id = $1", sid,
+        )
+        assert row["source_agent"] == "codex"
+    finally:
+        await db_pool.execute("DELETE FROM mcp_servers WHERE id = $1", sid)
+
+
+@pytest.mark.asyncio
+async def test_annotate_stamps_codex(db_pool):
+    from src.tools.annotations import annotate
+    # Seed a lesson to annotate
+    row = await db_pool.fetchrow(
+        """INSERT INTO lessons (title, content, source_agent)
+           VALUES ('v6-anno-target', 'c', 'claude') RETURNING id""",
+    )
+    lesson_id = row["id"]
+    _codex()
+    try:
+        result = await annotate(
+            entity_type="lesson",
+            entity_id=lesson_id,
+            note="codex says watch out",
+            ctx=_ctx(db_pool),
+        )
+        payload = _json.loads(result)
+        anno_id = payload["annotation_id"]
+        try:
+            arow = await db_pool.fetchrow(
+                "SELECT source_agent FROM annotations WHERE id = $1", anno_id,
+            )
+            assert arow["source_agent"] == "codex"
+        finally:
+            await db_pool.execute("DELETE FROM annotations WHERE id = $1", anno_id)
+    finally:
+        await db_pool.execute("DELETE FROM lessons WHERE id = $1", lesson_id)
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `pytest tests/test_rule_b.py -v -k owned_inserts_stamp`
-Expected: All four parametrized cases FAIL — source_agent='claude'.
+Run: `pytest tests/test_rule_b.py -v -k "stamp_codex"`
+Expected: each FAILs because the INSERT defaults source_agent='claude'.
 
-- [ ] **Step 3: Modify each tool's INSERT**
+- [ ] **Step 3: Stamp each INSERT**
 
-For each of `create_spec` (specs.py), `register_agent` (agents.py), `register_mcp_server` (mcp_registry.py), `register_mcp_tool` (mcp_registry.py), `annotate` (annotations.py), apply the pattern:
+For each of the four tools, find the INSERT and add `source_agent, source_client_id` columns + parameters. Pattern (apply to `create_spec`, `register_agent`, `register_mcp_server`, `register_mcp_tool`, `annotate`):
 
 ```python
 from src.identity import stamp
 source_agent, source_client_id = stamp()
-# Then in the INSERT: add ", source_agent, source_client_id" to columns,
-# add ", $N, $N+1" to VALUES, append source_agent, source_client_id to params.
+# ...
+# In the INSERT statement: add ", source_agent, source_client_id" to the
+# column list, add the next two $-params, and append source_agent,
+# source_client_id to the parameter tuple.
 ```
 
-Each tool's INSERT is a few lines; the change is purely additive.
+**Special case — `annotate`'s UPDATE-on-conflict branch:** the tool appends to an existing annotation row if one exists for the same `(entity_type, entity_id)`. **Do NOT change source_agent on UPDATE** — the first writer keeps ownership. This means a codex agent appending to a claude annotation: the codex update succeeds (rule-b is enforced only on `clear_annotation` per spec Decision #2), but the `source_agent` of the row stays `'claude'`. Document this in a one-line comment in the UPDATE branch.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `pytest tests/test_rule_b.py -v`
-Expected: All tests PASS.
+Expected: all current tests PASS.
 
 - [ ] **Step 5: Commit**
 
@@ -1414,13 +1641,104 @@ git commit -m "feat(v6): stamp source_agent on spec/agent/mcp/annotation inserts
 
 ---
 
-## Task 10: Stamp Shared-Metadata Writes — Projects, Project State, Infra
+## Task 9: Stamp Inserts — Sessions, Add-Project, Add-Machine, Add-Container
 
 **Files:**
-- Modify: `src/tools/projects.py`, `src/tools/infra.py`, `src/tools/sessions.py`
+- Modify: `src/tools/sessions.py`, `src/tools/admin.py` (add_project), `src/tools/infra.py` (add_machine/add_container if there; otherwise wherever they're defined)
 - Modify: `tests/test_rule_b.py`
 
-Shared metadata follows Pattern 3: stamp `source_agent` on the row to the **current writer's** family (not the original author's). Subsequent writers overwrite it. No `assert_can_write` check.
+- [ ] **Step 1: Locate add_machine and add_container**
+
+```bash
+grep -n "async def add_machine\|async def add_container" src/tools/*.py
+```
+
+Modify the file(s) reported.
+
+- [ ] **Step 2: Write the failing tests**
+
+Append to `tests/test_rule_b.py`:
+
+```python
+@pytest.mark.asyncio
+async def test_start_session_stamps_codex(db_pool):
+    from src.tools.sessions import start_session
+    # Seed a machine
+    m = await db_pool.fetchrow(
+        "INSERT INTO machines (name) VALUES ('v6-sess-mac') RETURNING id",
+    )
+    _codex()
+    try:
+        result = await start_session(
+            machine="v6-sess-mac", ctx=_ctx(db_pool),
+        )
+        payload = _json.loads(result)
+        sid = payload["session_id"]
+        try:
+            row = await db_pool.fetchrow(
+                "SELECT source_agent FROM sessions WHERE id = $1", sid,
+            )
+            assert row["source_agent"] == "codex"
+        finally:
+            await db_pool.execute("DELETE FROM sessions WHERE id = $1", sid)
+    finally:
+        await db_pool.execute("DELETE FROM machines WHERE id = $1", m["id"])
+
+
+@pytest.mark.asyncio
+async def test_add_project_stamps_codex(db_pool):
+    from src.tools.admin import add_project
+    _codex()
+    result = await add_project(
+        name="v6-add-proj",
+        path="/tmp",
+        ctx=_ctx(db_pool),
+    )
+    payload = _json.loads(result)
+    pid = payload["project_id"]
+    try:
+        row = await db_pool.fetchrow(
+            "SELECT source_agent FROM projects WHERE id = $1", pid,
+        )
+        assert row["source_agent"] == "codex"
+    finally:
+        await db_pool.execute("DELETE FROM projects WHERE id = $1", pid)
+```
+
+- [ ] **Step 3: Run tests to verify they fail**
+
+Run: `pytest tests/test_rule_b.py -v -k "start_session_stamps or add_project_stamps"`
+Expected: both FAIL.
+
+- [ ] **Step 4: Stamp the inserts**
+
+Apply the same Pattern-1 stamping to `start_session`, `add_project`, `add_machine`, `add_container` (and any other `add_*` tool found in Step 1).
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `pytest tests/test_rule_b.py -v`
+Expected: all PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/tools/sessions.py src/tools/admin.py src/tools/infra.py tests/test_rule_b.py
+git commit -m "feat(v6): stamp source_agent on session/project/machine/container inserts"
+```
+
+---
+
+## Task 10: Stamp Shared-Metadata Writes (Pattern 3)
+
+**Files:**
+- Modify: `src/tools/admin.py` (update_project_state, merge_projects), `src/tools/projects.py` (set_project_claude_md, update_project_claude_md), `src/tools/sessions.py` (end_session's project_state upsert)
+- Modify: `tests/test_rule_b.py`
+
+Pattern 3 = stamp `source_agent` to the **current writer's** family on each UPDATE (last-writer-wins).
+
+**Key gotchas:**
+- `update_project_state` uses a **dynamic-clauses builder** (`updates = [...]` list). The stamp must be appended to the list so unset fields aren't overwritten with NULL.
+- `end_session` performs an `INSERT INTO project_state (...) ON CONFLICT (project_id) DO UPDATE SET ...` separately from `update_project_state`. Both branches must stamp.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1429,98 +1747,166 @@ Append to `tests/test_rule_b.py`:
 ```python
 @pytest.mark.asyncio
 async def test_update_project_state_stamps_writer(db_pool):
-    """update_project_state stamps source_agent of the *writer*, not the original author."""
-    from src.tools.projects import update_project_state
-    from src.server import AppContext
-    from unittest.mock import MagicMock
-
-    # Insert a project owned by claude
+    from src.tools.admin import update_project_state
     proj = await db_pool.fetchrow(
-        """INSERT INTO projects (name, source_agent) VALUES ('v6-pstate-test', 'claude')
-           RETURNING id""",
+        "INSERT INTO projects (name, source_agent) VALUES ('v6-pstate', 'claude') RETURNING id",
     )
-    project_id = proj["id"]
-
-    set_identity(Identity(
-        family="codex", client_id="apikey:7",
-        scopes=["read", "write"], source="apikey",
-    ))
-    ctx = MagicMock()
-    ctx.request_context.lifespan_context = AppContext(
-        db=db_pool, openai=MagicMock(), anthropic=MagicMock(),
-    )
-
+    _codex()
     try:
-        await update_project_state(
-            project="v6-pstate-test",
+        result = await update_project_state(
+            project="v6-pstate",
             current_focus="codex took over",
-            ctx=ctx,
+            ctx=_ctx(db_pool),
+        )
+        assert "error" not in _json.loads(result)
+        row = await db_pool.fetchrow(
+            "SELECT source_agent FROM project_state WHERE project_id = $1", proj["id"],
+        )
+        assert row["source_agent"] == "codex"
+    finally:
+        await db_pool.execute("DELETE FROM project_state WHERE project_id = $1", proj["id"])
+        await db_pool.execute("DELETE FROM projects WHERE id = $1", proj["id"])
+
+
+@pytest.mark.asyncio
+async def test_end_session_stamps_project_state(db_pool, mock_openai):
+    from src.tools.sessions import start_session, end_session
+    m = await db_pool.fetchrow(
+        "INSERT INTO machines (name) VALUES ('v6-end-mac') RETURNING id",
+    )
+    p = await db_pool.fetchrow(
+        "INSERT INTO projects (name) VALUES ('v6-end-proj') RETURNING id",
+    )
+    _codex()
+    try:
+        s = _json.loads(await start_session(
+            machine="v6-end-mac", project="v6-end-proj",
+            ctx=_ctx(db_pool, mock_openai),
+        ))
+        sid = s["session_id"]
+        await end_session(
+            session_id=sid, summary="codex did stuff",
+            ctx=_ctx(db_pool, mock_openai),
         )
         row = await db_pool.fetchrow(
-            "SELECT source_agent FROM project_state WHERE project_id = $1",
-            project_id,
+            "SELECT source_agent FROM project_state WHERE project_id = $1", p["id"],
         )
-        assert row["source_agent"] == "codex"  # writer, not the project owner
+        assert row["source_agent"] == "codex"
     finally:
-        await db_pool.execute("DELETE FROM project_state WHERE project_id = $1", project_id)
-        await db_pool.execute("DELETE FROM projects WHERE id = $1", project_id)
+        await db_pool.execute("DELETE FROM project_state WHERE project_id = $1", p["id"])
+        await db_pool.execute("DELETE FROM sessions WHERE project_id = $1", p["id"])
+        await db_pool.execute("DELETE FROM projects WHERE id = $1", p["id"])
+        await db_pool.execute("DELETE FROM machines WHERE id = $1", m["id"])
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run tests to verify they fail**
 
-Run: `pytest tests/test_rule_b.py::test_update_project_state_stamps_writer -v`
-Expected: FAIL — source_agent='claude' default.
+Run: `pytest tests/test_rule_b.py -v -k "stamps_writer or end_session_stamps"`
+Expected: both FAIL.
 
-- [ ] **Step 3: Modify the project / infra / sessions write tools**
+- [ ] **Step 3: Modify `update_project_state` (dynamic-builder pattern)**
 
-For each tool that mutates a shared-metadata row (`update_project_state`, `add_project`, `set_project_claude_md`, `update_project_claude_md`, `add_machine`, `add_container`, `start_session`, `end_session`, etc.), wrap the SQL to set `source_agent = $N, source_client_id = $N+1` on the row.
+In `src/tools/admin.py`, find `update_project_state`. It builds a dynamic `updates = [...]` list and appends to a params list. Find the `if current_focus is not None: updates.append(...)` block and add an unconditional stamp pair at the end:
 
-For INSERT-or-UPDATE patterns (common with project_state's UPSERT), include the stamp columns in both INSERT and the ON CONFLICT DO UPDATE branch. Example for project_state:
+```python
+from src.identity import stamp
+source_agent, source_client_id = stamp()
+
+# ... existing dynamic-clauses logic ...
+
+# Always stamp on every UPDATE (Pattern 3, last-writer-wins)
+updates.append(f"source_agent = ${param_idx}")
+params.append(source_agent)
+param_idx += 1
+updates.append(f"source_client_id = ${param_idx}")
+params.append(source_client_id)
+param_idx += 1
+```
+
+The INSERT branch (when no row exists yet) must also include the columns:
+
+```python
+await app.db.execute(
+    """INSERT INTO project_state (project_id, current_focus, blockers, next_steps,
+                                   source_agent, source_client_id)
+       VALUES ($1, $2, $3, $4, $5, $6)""",
+    project_id, current_focus or "", blockers or [], next_steps or [],
+    source_agent, source_client_id,
+)
+```
+
+- [ ] **Step 4: Modify `end_session`'s project_state UPSERT**
+
+In `src/tools/sessions.py`, find the `INSERT INTO project_state (...) ON CONFLICT (project_id) DO UPDATE SET ...` block. Add `source_agent, source_client_id` to both branches:
 
 ```python
 from src.identity import stamp
 source_agent, source_client_id = stamp()
 await app.db.execute(
-    """
-    INSERT INTO project_state (project_id, current_focus, blockers, next_steps,
-                                source_agent, source_client_id)
-    VALUES ($1, $2, $3, $4, $5, $6)
-    ON CONFLICT (project_id) DO UPDATE
-    SET current_focus = EXCLUDED.current_focus,
-        blockers      = EXCLUDED.blockers,
-        next_steps    = EXCLUDED.next_steps,
-        source_agent  = EXCLUDED.source_agent,
-        source_client_id = EXCLUDED.source_client_id,
-        updated_at    = NOW()
-    """,
-    project_id, current_focus, blockers or [], next_steps or [],
-    source_agent, source_client_id,
+    """INSERT INTO project_state (project_id, last_session_id, updated_at,
+                                   source_agent, source_client_id)
+       VALUES ($1, $2, NOW(), $3, $4)
+       ON CONFLICT (project_id) DO UPDATE
+       SET last_session_id  = EXCLUDED.last_session_id,
+           updated_at       = NOW(),
+           source_agent     = EXCLUDED.source_agent,
+           source_client_id = EXCLUDED.source_client_id""",
+    project_id, session_id, source_agent, source_client_id,
 )
 ```
 
-Adjust each tool's SQL to match its actual columns; the principle is the same.
+(Adjust to match the actual column list of the existing UPSERT.)
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [ ] **Step 5: Modify `set_project_claude_md` and `update_project_claude_md`**
+
+In `src/tools/projects.py`, each tool runs `UPDATE projects SET claude_md = $1 WHERE ...`. Add the stamp to each UPDATE:
+
+```python
+from src.identity import stamp
+source_agent, source_client_id = stamp()
+await app.db.execute(
+    """UPDATE projects SET claude_md = $1, source_agent = $2, source_client_id = $3
+       WHERE id = $4""",
+    content, source_agent, source_client_id, project_id,
+)
+```
+
+- [ ] **Step 6: Modify `merge_projects` (stamp the resulting projects row too)**
+
+In `src/tools/admin.py`'s `merge_projects`, after the merge logic concludes, the `keep` project row may be left untouched. We don't strictly need to stamp it (the merge act doesn't change `keep`'s content), but the alias INSERT does need stamping if `project_aliases` got `source_agent` columns. Apply stamp pattern there.
+
+- [ ] **Step 7: Run tests to verify they pass**
 
 Run: `pytest tests/test_rule_b.py -v`
-Expected: All tests PASS.
+Expected: all PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add src/tools/projects.py src/tools/infra.py src/tools/sessions.py tests/test_rule_b.py
-git commit -m "feat(v6): stamp source_agent on shared-metadata writes (last-writer-wins)"
+git add src/tools/admin.py src/tools/sessions.py src/tools/projects.py tests/test_rule_b.py
+git commit -m "feat(v6): stamp shared-metadata writes (last-writer-wins)"
 ```
 
 ---
 
-## Task 11: Rule-B Enforcement — Owned Content Updates
+## Task 11: Rule-B Enforcement on Owned-Content Updates/Retires
 
 **Files:**
 - Modify: `src/tools/lessons.py`, `src/tools/specs.py`, `src/tools/agents.py`, `src/tools/mcp_registry.py`, `src/tools/annotations.py`
 - Modify: `tests/test_rule_b.py`
 
-Every update/retire on owned content gets a `assert_can_write` call before mutation.
+Tools to gate (each gets `assert_can_write` + acting-agent audit field):
+- `update_lesson` → `lessons.updated_by_agent`
+- `retire_lesson` → `lessons.retired_by_agent`
+- `update_spec` → `specifications.updated_by_agent`
+- `retire_spec` → `specifications.retired_by_agent`
+- `update_agent` → `agent_specs.updated_by_agent`
+- `retire_agent` → `agent_specs.retired_by_agent`
+- `update_mcp_server` → `mcp_servers.updated_by_agent`
+- `retire_mcp_server` → `mcp_servers.retired_by_agent`
+- `clear_annotation` → `annotations.updated_by_agent` (or just stamp delete — clear sets `note=''`)
+
+`update_*` tools that build dynamic UPDATE clauses need the audit field appended to the `updates = [...]` list (Pattern: same approach as Task 10 step 3).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1529,30 +1915,18 @@ Append to `tests/test_rule_b.py`:
 ```python
 @pytest.mark.asyncio
 async def test_codex_cannot_retire_claude_lesson(db_pool):
-    """retire_lesson from codex on a claude lesson raises PermissionError."""
     from src.tools.lessons import retire_lesson
-    from src.server import AppContext
-    from unittest.mock import MagicMock
-
     row = await db_pool.fetchrow(
         """INSERT INTO lessons (title, content, source_agent)
-           VALUES ('v6-retire-foreign-test', 'claude content', 'claude')
-           RETURNING id""",
+           VALUES ('v6-retire-foreign', 'c', 'claude') RETURNING id""",
     )
     lesson_id = row["id"]
-
-    set_identity(Identity(
-        family="codex", client_id="apikey:7",
-        scopes=["read", "write"], source="apikey",
-    ))
-    ctx = MagicMock()
-    ctx.request_context.lifespan_context = AppContext(
-        db=db_pool, openai=MagicMock(), anthropic=MagicMock(),
-    )
-
+    _codex()
     try:
         with pytest.raises(PermissionError) as exc:
-            await retire_lesson(lesson_id=lesson_id, reason="codex says no", ctx=ctx)
+            await retire_lesson(
+                lesson_id=lesson_id, reason="codex says no", ctx=_ctx(db_pool),
+            )
         assert "codex" in str(exc.value)
         assert "claude" in str(exc.value)
     finally:
@@ -1561,84 +1935,102 @@ async def test_codex_cannot_retire_claude_lesson(db_pool):
 
 @pytest.mark.asyncio
 async def test_codex_can_retire_own_lesson(db_pool):
-    """retire_lesson from codex on a codex lesson succeeds."""
     from src.tools.lessons import retire_lesson
-    from src.server import AppContext
-    from unittest.mock import MagicMock
-    import json as _json
-
     row = await db_pool.fetchrow(
         """INSERT INTO lessons (title, content, source_agent)
-           VALUES ('v6-retire-own-test', 'codex content', 'codex')
-           RETURNING id""",
+           VALUES ('v6-retire-own', 'c', 'codex') RETURNING id""",
     )
     lesson_id = row["id"]
-
-    set_identity(Identity(
-        family="codex", client_id="apikey:7",
-        scopes=["read", "write"], source="apikey",
-    ))
-    ctx = MagicMock()
-    ctx.request_context.lifespan_context = AppContext(
-        db=db_pool, openai=MagicMock(), anthropic=MagicMock(),
-    )
-
+    _codex()
     try:
-        result = await retire_lesson(lesson_id=lesson_id, reason="cleanup", ctx=ctx)
+        result = await retire_lesson(
+            lesson_id=lesson_id, reason="cleanup", ctx=_ctx(db_pool),
+        )
         payload = _json.loads(result)
         assert payload.get("success") is True
         row = await db_pool.fetchrow(
-            "SELECT retired_at, retired_by_agent FROM lessons WHERE id = $1",
-            lesson_id,
+            "SELECT retired_at, retired_by_agent FROM lessons WHERE id = $1", lesson_id,
         )
         assert row["retired_at"] is not None
         assert row["retired_by_agent"] == "codex"
     finally:
         await db_pool.execute("DELETE FROM lessons WHERE id = $1", lesson_id)
+
+
+@pytest.mark.asyncio
+async def test_codex_cannot_clear_claude_annotation(db_pool):
+    from src.tools.annotations import clear_annotation
+    # Seed a claude-owned annotation on a claude lesson
+    L = await db_pool.fetchrow(
+        """INSERT INTO lessons (title, content, source_agent)
+           VALUES ('v6-clear-anno-target', 'c', 'claude') RETURNING id""",
+    )
+    A = await db_pool.fetchrow(
+        """INSERT INTO annotations (entity_type, entity_id, note, source_agent)
+           VALUES ('lesson', $1, 'claude wrote this', 'claude') RETURNING id""",
+        L["id"],
+    )
+    _codex()
+    try:
+        with pytest.raises(PermissionError):
+            await clear_annotation(
+                entity_type="lesson", entity_id=L["id"], ctx=_ctx(db_pool),
+            )
+    finally:
+        await db_pool.execute("DELETE FROM annotations WHERE id = $1", A["id"])
+        await db_pool.execute("DELETE FROM lessons WHERE id = $1", L["id"])
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `pytest tests/test_rule_b.py -v -k retire`
-Expected: First test FAILS (no PermissionError raised); second fails on `retired_by_agent` column.
+Run: `pytest tests/test_rule_b.py -v -k "retire or clear_claude"`
+Expected: foreign-retire FAILs (no error raised); own-retire FAILs on `retired_by_agent` column read.
 
-- [ ] **Step 3: Add rule-b enforcement and audit-field stamping**
+- [ ] **Step 3: Apply rule-b + audit stamps**
 
-For each owned-content update/retire tool, before the UPDATE, add:
+For each tool in the list above, before the UPDATE, add:
 
 ```python
 from src.identity import assert_can_write, stamp
-await assert_can_write(app.db, "lessons", lesson_id)
+await assert_can_write(app.db, "<table>", <row_id>)
 acting_agent, _ = stamp()
 ```
 
-Then extend the UPDATE to set `retired_by_agent = $X` or `updated_by_agent = $X`. Example for `retire_lesson`:
+Then extend the UPDATE to set the appropriate audit field. Two patterns:
+
+**Static UPDATE (`retire_lesson`):**
 
 ```python
 await app.db.execute(
-    """UPDATE lessons
-       SET retired_at = NOW(),
-           retired_reason = $1,
-           retired_by_agent = $2
+    """UPDATE lessons SET retired_at = NOW(),
+                          retired_reason = $1,
+                          retired_by_agent = $2
        WHERE id = $3""",
     reason, acting_agent, lesson_id,
 )
 ```
 
-Apply the same pattern to: `update_lesson`, `update_spec`, `retire_spec`, `update_agent`, `retire_agent`, `update_mcp_server`, `retire_mcp_server`, `clear_annotation`.
+**Dynamic UPDATE (`update_lesson`):**
 
-For `clear_annotation`: rule-b means an agent can only clear its own annotation, even if attached to someone else's lesson. The check is on the annotation row's source_agent, not the parent lesson — `assert_can_write(app.db, "annotations", annotation_id)`.
+```python
+updates.append(f"updated_by_agent = ${param_idx}")
+params.append(acting_agent)
+param_idx += 1
+# ... existing build of SET clause ...
+```
+
+For `clear_annotation`: rule-b key is the annotation's own `source_agent`. Look up the annotation by `(entity_type, entity_id)` first to get its id, then `assert_can_write(app.db, 'annotations', annotation_id)`.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `pytest tests/test_rule_b.py -v`
-Expected: All tests PASS.
+Expected: all PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/tools/lessons.py src/tools/specs.py src/tools/agents.py src/tools/mcp_registry.py src/tools/annotations.py tests/test_rule_b.py
-git commit -m "feat(v6): rule-b enforcement on owned-content updates + retires"
+git commit -m "feat(v6): rule-b enforcement + audit fields on owned-content updates/retires"
 ```
 
 ---
@@ -1646,122 +2038,92 @@ git commit -m "feat(v6): rule-b enforcement on owned-content updates + retires"
 ## Task 12: Admin Scope on `merge_projects` and `resolve_conflict`
 
 **Files:**
-- Modify: `src/tools/projects.py` (for `merge_projects`), `src/tools/admin.py` (or wherever `resolve_conflict` lives)
+- Modify: `src/tools/admin.py` (merge_projects), `src/tools/consolidation.py` (resolve_conflict)
 - Modify: `tests/test_rule_b.py`
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing tests**
 
 Append to `tests/test_rule_b.py`:
 
 ```python
 @pytest.mark.asyncio
 async def test_merge_projects_requires_admin(db_pool):
-    """merge_projects without admin scope raises PermissionError."""
-    from src.tools.projects import merge_projects
-    from src.server import AppContext
-    from unittest.mock import MagicMock
-
+    from src.tools.admin import merge_projects
+    a = await db_pool.fetchrow(
+        "INSERT INTO projects (name) VALUES ('v6-merge-A') RETURNING id",
+    )
+    b = await db_pool.fetchrow(
+        "INSERT INTO projects (name) VALUES ('v6-merge-B') RETURNING id",
+    )
     set_identity(Identity(
         family="claude", client_id="apikey:7",
-        scopes=["read", "write"], source="apikey",  # No admin
+        scopes=["read", "write"], source="apikey",
     ))
-    ctx = MagicMock()
-    ctx.request_context.lifespan_context = AppContext(
-        db=db_pool, openai=MagicMock(), anthropic=MagicMock(),
-    )
-
-    with pytest.raises(PermissionError) as exc:
-        await merge_projects(source_name="A", target_name="B", ctx=ctx)
-    assert "admin" in str(exc.value).lower()
+    try:
+        with pytest.raises(PermissionError) as exc:
+            await merge_projects(
+                keep="v6-merge-A", merge="v6-merge-B", ctx=_ctx(db_pool),
+            )
+        assert "admin" in str(exc.value).lower()
+    finally:
+        await db_pool.execute("DELETE FROM projects WHERE id IN ($1, $2)", a["id"], b["id"])
 
 
 @pytest.mark.asyncio
-async def test_merge_projects_with_admin_proceeds(db_pool):
-    """merge_projects with admin scope passes the permission gate."""
-    from src.tools.projects import merge_projects
-    from src.server import AppContext
-    from unittest.mock import MagicMock
-
-    a = await db_pool.fetchrow(
-        "INSERT INTO projects (name) VALUES ('v6-merge-A') RETURNING id"
-    )
-    b = await db_pool.fetchrow(
-        "INSERT INTO projects (name) VALUES ('v6-merge-B') RETURNING id"
-    )
-
+async def test_resolve_conflict_requires_admin(db_pool):
+    from src.tools.consolidation import resolve_conflict
     set_identity(Identity(
         family="claude", client_id="apikey:7",
-        scopes=["read", "write", "admin"], source="apikey",
+        scopes=["read", "write"], source="apikey",
     ))
-    ctx = MagicMock()
-    ctx.request_context.lifespan_context = AppContext(
-        db=db_pool, openai=MagicMock(), anthropic=MagicMock(),
-    )
-
-    try:
-        # Should NOT raise PermissionError. May raise other errors due to test
-        # setup; we only care about the scope gate.
-        try:
-            await merge_projects(source_name="v6-merge-A", target_name="v6-merge-B", ctx=ctx)
-        except PermissionError:
-            raise
-        except Exception:
-            pass  # Other errors are out of scope for this test
-    finally:
-        await db_pool.execute("DELETE FROM projects WHERE id IN ($1, $2)", a["id"], b["id"])
+    with pytest.raises(PermissionError):
+        await resolve_conflict(
+            conflict_id=99999, resolution="kept_both", ctx=_ctx(db_pool),
+        )
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `pytest tests/test_rule_b.py -v -k merge_projects`
-Expected: Both fail (no admin gate exists yet).
+Run: `pytest tests/test_rule_b.py -v -k "requires_admin"`
+Expected: FAIL (no admin gate exists).
 
-- [ ] **Step 3: Add admin scope gate**
+- [ ] **Step 3: Add admin gates**
 
-In `src/identity.py`, add a helper:
-
-```python
-def require_admin() -> None:
-    """Raise PermissionError if the current identity lacks 'admin' scope."""
-    identity = get_identity()
-    scopes = identity.scopes if identity else ["read", "write"]
-    if "admin" not in scopes:
-        family = identity.family if identity else "claude"
-        raise PermissionError(
-            f"agent '{family}' lacks 'admin' scope required for this operation"
-        )
-```
-
-Then in `merge_projects`:
+In `src/tools/admin.py`'s `merge_projects`, first line of body:
 
 ```python
 from src.identity import require_admin
 require_admin()
-# ... rest of the merge logic
 ```
 
-Same for `resolve_conflict` wherever it's defined.
+In `src/tools/consolidation.py`'s `resolve_conflict`, same:
+
+```python
+from src.identity import require_admin
+require_admin()
+```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `pytest tests/test_rule_b.py -v -k merge_projects`
-Expected: Both PASS.
+Run: `pytest tests/test_rule_b.py -v -k "requires_admin"`
+Expected: both PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/identity.py src/tools/projects.py src/tools/admin.py tests/test_rule_b.py
-git commit -m "feat(v6): require admin scope for merge_projects + resolve_conflict"
+git add src/tools/admin.py src/tools/consolidation.py tests/test_rule_b.py
+git commit -m "feat(v6): admin scope required for merge_projects + resolve_conflict"
 ```
 
 ---
 
-## Task 13: Cross-Agent Consolidation Skip — Log-Time
+## Task 13: Cross-Agent Skip — Log-Time Consolidation
 
 **Files:**
-- Modify: `src/consolidation/candidates.py`
-- Modify: `src/consolidation/orchestrator.py` (caller passes source_agent through)
-- Modify: `src/tools/lessons.py` (passes new lesson's source_agent to consolidator)
+- Modify: `src/consolidation/candidates.py` — `find_candidates` adds **required** `source_agent` parameter (no default).
+- Modify: `src/consolidation/orchestrator.py` — pass through.
+- Modify: `src/tools/lessons.py` — pass stamped family to consolidator.
+- Modify existing tests: `tests/test_candidates.py` adds `source_agent="claude"` to all call sites.
 - Create: `tests/test_consolidation_cross_agent.py`
 
 - [ ] **Step 1: Write the failing test**
@@ -1778,50 +2140,38 @@ from src.consolidation.candidates import find_candidates
 
 @pytest.mark.asyncio
 async def test_find_candidates_skips_cross_agent(db_pool):
-    """A codex lesson does NOT match a claude lesson even at high cosine."""
-    # Insert two lessons with identical content (cosine ~ 1.0 if same embedding),
-    # one stamped 'claude', one stamped 'codex'.
-    # We use a synthetic identical embedding to force a max-similarity neighbor.
+    """A codex lesson does NOT match a claude lesson even at cosine ~1.0."""
     emb = "[" + ",".join(["0.1"] * 1536) + "]"
-
-    claude_row = await db_pool.fetchrow(
+    claude = await db_pool.fetchrow(
         """INSERT INTO lessons (title, content, embedding, source_agent)
-           VALUES ('v6-xagent-claude', 'shared content', $1::vector, 'claude')
-           RETURNING id""",
+           VALUES ('v6-xagent-claude', 'shared', $1::vector, 'claude') RETURNING id""",
         emb,
     )
-    codex_row = await db_pool.fetchrow(
+    codex = await db_pool.fetchrow(
         """INSERT INTO lessons (title, content, embedding, source_agent)
-           VALUES ('v6-xagent-codex', 'shared content', $1::vector, 'codex')
-           RETURNING id""",
+           VALUES ('v6-xagent-codex', 'shared', $1::vector, 'codex') RETURNING id""",
         emb,
     )
-
     try:
-        # Query as if codex just logged a new lesson
         candidates = await find_candidates(
             pool=db_pool,
             query_embedding=[0.1] * 1536,
-            new_lesson_id=codex_row["id"],
+            new_lesson_id=codex["id"],
             project_id=None,
             cosine_threshold=0.85,
             top_k=10,
-            source_agent="codex",  # NEW parameter
+            source_agent="codex",
         )
-
-        # The claude lesson should NOT appear, even though cosine ~ 1.0
-        candidate_ids = {c["id"] for c in candidates}
-        assert claude_row["id"] not in candidate_ids
+        ids = {c["id"] for c in candidates}
+        assert claude["id"] not in ids
     finally:
         await db_pool.execute(
-            "DELETE FROM lessons WHERE id IN ($1, $2)",
-            claude_row["id"], codex_row["id"],
+            "DELETE FROM lessons WHERE id IN ($1, $2)", claude["id"], codex["id"],
         )
 
 
 @pytest.mark.asyncio
 async def test_find_candidates_matches_same_agent(db_pool):
-    """A codex lesson DOES match another codex lesson at high cosine."""
     emb = "[" + ",".join(["0.1"] * 1536) + "]"
     a = await db_pool.fetchrow(
         """INSERT INTO lessons (title, content, embedding, source_agent)
@@ -1834,33 +2184,45 @@ async def test_find_candidates_matches_same_agent(db_pool):
         emb,
     )
     try:
-        candidates = await find_candidates(
-            pool=db_pool,
-            query_embedding=[0.1] * 1536,
-            new_lesson_id=b["id"],
-            project_id=None,
-            cosine_threshold=0.85,
-            top_k=10,
-            source_agent="codex",
+        cands = await find_candidates(
+            pool=db_pool, query_embedding=[0.1] * 1536,
+            new_lesson_id=b["id"], project_id=None,
+            cosine_threshold=0.85, top_k=10, source_agent="codex",
         )
-        candidate_ids = {c["id"] for c in candidates}
-        assert a["id"] in candidate_ids
+        assert a["id"] in {c["id"] for c in cands}
     finally:
         await db_pool.execute(
             "DELETE FROM lessons WHERE id IN ($1, $2)", a["id"], b["id"],
+        )
+
+
+@pytest.mark.asyncio
+async def test_find_candidates_missing_source_agent_is_typeerror():
+    """Required param: caller forgetting source_agent gets a clear failure."""
+    with pytest.raises(TypeError):
+        await find_candidates(
+            pool=None, query_embedding=[], new_lesson_id=0,
+            project_id=None, cosine_threshold=0.85, top_k=1,
         )
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `pytest tests/test_consolidation_cross_agent.py -v`
-Expected: FAIL — `find_candidates()` does not accept `source_agent` keyword.
+Expected: all FAIL — `find_candidates` doesn't accept `source_agent`.
 
-- [ ] **Step 3: Modify `find_candidates`**
+- [ ] **Step 3: Modify `find_candidates` (make source_agent required)**
 
-In `src/consolidation/candidates.py`, change the signature and query:
+In `src/consolidation/candidates.py`, replace the function with:
 
 ```python
+"""Candidate finder: top-k nearest non-retired lessons above a cosine threshold."""
+
+from typing import Any
+
+import asyncpg
+
+
 async def find_candidates(
     pool: asyncpg.Pool,
     query_embedding: list[float],
@@ -1868,14 +2230,14 @@ async def find_candidates(
     project_id: int | None,
     cosine_threshold: float,
     top_k: int,
-    source_agent: str = "claude",  # NEW
+    source_agent: str,           # REQUIRED — cross-agent skip
 ) -> list[dict[str, Any]]:
-    """Return up to `top_k` lessons with cosine similarity >= threshold.
+    """Return up to `top_k` lessons with cosine >= threshold AND same source_agent.
 
-    Filters to lessons with matching source_agent (cross-agent skip).
+    Required `source_agent`: callers must explicitly specify the agent family
+    of the new lesson. Filtering same-agent prevents cross-agent auto-merge.
     """
     emb_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
-
     rows = await pool.fetch(
         """
         SELECT id, title, content, project_id, tags, severity,
@@ -1893,66 +2255,41 @@ async def find_candidates(
         """,
         emb_str, new_lesson_id, project_id, cosine_threshold, source_agent, top_k,
     )
-
     return [dict(r) for r in rows]
 ```
 
-- [ ] **Step 4: Thread source_agent through the call chain**
+- [ ] **Step 4: Thread `source_agent` through `consolidate_at_log`**
 
-In `src/consolidation/orchestrator.py`, find the call to `find_candidates`. Pass through the lesson's source_agent:
+In `src/consolidation/orchestrator.py`, find `consolidate_at_log` and add `new_source_agent: str` to its signature. Pass it to the `find_candidates` call.
 
-```python
-candidates = await find_candidates(
-    pool=pool,
-    query_embedding=new_embedding,
-    new_lesson_id=new_lesson_id,
-    project_id=project_id,
-    cosine_threshold=COSINE_THRESHOLD,
-    top_k=TOP_K,
-    source_agent=new_source_agent,  # NEW
-)
+In `src/tools/lessons.py`, find the `consolidate_at_log(...)` call inside `log_lesson` and pass `new_source_agent=source_agent` (the value already stamped earlier in the function).
+
+- [ ] **Step 5: Update existing tests that call `find_candidates` directly**
+
+```bash
+grep -rn "find_candidates(" tests/
 ```
 
-Add `new_source_agent: str` to `consolidate_at_log`'s signature.
+For each call site missing `source_agent`, add `source_agent="claude"` (the historical default). Tests in `tests/test_candidates.py` are the primary site.
 
-In `src/tools/lessons.py`, find the `consolidate_at_log` call inside `log_lesson` and pass the stamped family:
+- [ ] **Step 6: Run all consolidation tests**
 
-```python
-consolidation = await consolidate_at_log(
-    pool=app.db,
-    anthropic=app.anthropic,
-    new_lesson_id=lesson_id,
-    new_title=title,
-    new_content=content,
-    new_embedding=embedding,
-    project_id=project_id,
-    new_source_agent=source_agent,  # NEW (from earlier stamp() call)
-)
-```
-
-- [ ] **Step 5: Run tests to verify they pass**
-
-Run: `pytest tests/test_consolidation_cross_agent.py -v`
-Expected: Both tests PASS.
-
-- [ ] **Step 6: Run the existing consolidation test suite to ensure nothing else broke**
-
-Run: `pytest tests/test_candidates.py tests/test_actor_*.py tests/test_judge.py -v`
-Expected: All previously-passing tests still pass. Some tests may need a `source_agent='claude'` default added if they call `find_candidates` directly.
+Run: `pytest tests/test_consolidation_cross_agent.py tests/test_candidates.py tests/test_actor_*.py tests/test_judge.py -v`
+Expected: all PASS.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/consolidation/candidates.py src/consolidation/orchestrator.py src/tools/lessons.py tests/test_consolidation_cross_agent.py
-git commit -m "feat(v6): cross-agent skip in log-time consolidation candidate query"
+git add src/consolidation/candidates.py src/consolidation/orchestrator.py src/tools/lessons.py tests/test_consolidation_cross_agent.py tests/test_candidates.py
+git commit -m "feat(v6): cross-agent skip at log-time consolidation; source_agent required arg"
 ```
 
 ---
 
-## Task 14: Cross-Agent Skip — Backlog Apply Tool
+## Task 14: Analyzer Records source_agents
 
 **Files:**
-- Modify: `src/tools/backlog_apply.py`
+- Modify: `src/consolidation/backlog.py` — `generate_pairs` returns source_agents; `judge_and_record` writes them to `backlog_analysis`.
 - Modify: `tests/test_consolidation_cross_agent.py`
 
 - [ ] **Step 1: Write the failing test**
@@ -1961,189 +2298,291 @@ Append to `tests/test_consolidation_cross_agent.py`:
 
 ```python
 @pytest.mark.asyncio
-async def test_fetch_candidate_rows_skips_cross_agent(db_pool):
-    """fetch_candidate_rows excludes cross-agent pairs."""
-    from src.tools.backlog_apply import fetch_candidate_rows
+async def test_generate_pairs_returns_source_agents(db_pool):
+    """generate_pairs includes a_source_agent, b_source_agent in each pair."""
+    from src.consolidation.backlog import generate_pairs
 
     emb = "[" + ",".join(["0.1"] * 1536) + "]"
     claude = await db_pool.fetchrow(
         """INSERT INTO lessons (title, content, embedding, source_agent)
-           VALUES ('v6-backlog-claude', 'shared', $1::vector, 'claude') RETURNING id""",
+           VALUES ('v6-gp-claude', 'shared', $1::vector, 'claude') RETURNING id""",
         emb,
     )
     codex = await db_pool.fetchrow(
         """INSERT INTO lessons (title, content, embedding, source_agent)
-           VALUES ('v6-backlog-codex', 'shared', $1::vector, 'codex') RETURNING id""",
+           VALUES ('v6-gp-codex', 'shared', $1::vector, 'codex') RETURNING id""",
         emb,
     )
     try:
-        rows = await fetch_candidate_rows(
-            pool=db_pool,
-            cosine_threshold=0.85,
-            # Other fetch_candidate_rows arguments — match the real signature.
+        pairs = await generate_pairs(pool=db_pool, cosine_threshold=0.85)
+        pair = next(
+            (p for p in pairs
+             if {p["lesson_a_id"], p["lesson_b_id"]} == {claude["id"], codex["id"]}),
+            None,
         )
-        # No pair where left.source_agent != right.source_agent should appear.
-        for r in rows:
-            if r["left_id"] in (claude["id"], codex["id"]) and r["right_id"] in (claude["id"], codex["id"]):
-                pytest.fail(
-                    f"cross-agent pair leaked: {r['left_id']}/{r['right_id']}"
-                )
+        assert pair is not None
+        assert {pair["a_source_agent"], pair["b_source_agent"]} == {"claude", "codex"}
     finally:
         await db_pool.execute(
             "DELETE FROM lessons WHERE id IN ($1, $2)", claude["id"], codex["id"],
         )
 ```
 
-(If `fetch_candidate_rows` has a different signature, adjust the call. Look at the existing tests in `tests/test_backlog_pairs.py` for the real shape.)
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `pytest tests/test_consolidation_cross_agent.py::test_generate_pairs_returns_source_agents -v`
+Expected: FAIL — `KeyError: a_source_agent`.
+
+- [ ] **Step 3: Modify `generate_pairs`**
+
+In `src/consolidation/backlog.py`, find the SELECT inside `generate_pairs`. Add `a.source_agent AS a_source_agent, b.source_agent AS b_source_agent` to the SELECT clause. **Do not** filter — cross-agent pairs must remain visible for the analyzer.
+
+- [ ] **Step 4: Modify `judge_and_record`**
+
+Locate the INSERT INTO backlog_analysis. Extend it with `left_source_agent, right_source_agent` columns and pass through from the pair dict (`a_source_agent`, `b_source_agent`). The generated `cross_agent` column populates automatically.
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `pytest tests/test_consolidation_cross_agent.py -v`
+Expected: all PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/consolidation/backlog.py tests/test_consolidation_cross_agent.py
+git commit -m "feat(v6): analyzer records left/right_source_agent on backlog_analysis"
+```
+
+---
+
+## Task 15: Cross-Agent Skip — Backlog Apply
+
+**Files:**
+- Modify: `src/tools/backlog_apply.py` — `fetch_candidate_rows` filters out cross-agent rows.
+- Modify: `tests/test_consolidation_cross_agent.py`
+
+Important: `fetch_candidate_rows` reads from `backlog_analysis`, NOT directly from `lessons`. After Task 14, those rows have `left_source_agent`/`right_source_agent`. The filter goes on those.
+
+- [ ] **Step 1: Write the failing test**
+
+Append to `tests/test_consolidation_cross_agent.py`:
+
+```python
+@pytest.mark.asyncio
+async def test_fetch_candidate_rows_excludes_cross_agent(db_pool):
+    """fetch_candidate_rows does not return rows where left/right source_agents differ."""
+    from src.tools.backlog_apply import fetch_candidate_rows
+
+    # Seed a cross-agent backlog_analysis row directly
+    L1 = await db_pool.fetchrow(
+        """INSERT INTO lessons (title, content, source_agent)
+           VALUES ('v6-bx-l1', 'c', 'claude') RETURNING id""",
+    )
+    L2 = await db_pool.fetchrow(
+        """INSERT INTO lessons (title, content, source_agent)
+           VALUES ('v6-bx-l2', 'c', 'codex') RETURNING id""",
+    )
+    batch_id = "test-v6-cross-agent-skip"
+    await db_pool.execute(
+        """INSERT INTO backlog_analysis
+           (batch_run_id, lesson_a_id, lesson_b_id, cosine, verdict, confidence,
+            left_source_agent, right_source_agent)
+           VALUES ($1, $2, $3, 0.99, 'duplicate', 0.95, 'claude', 'codex')""",
+        batch_id, L1["id"], L2["id"],
+    )
+
+    # Also seed a same-agent row to verify it IS returned
+    L3 = await db_pool.fetchrow(
+        """INSERT INTO lessons (title, content, source_agent)
+           VALUES ('v6-bx-l3', 'c', 'claude') RETURNING id""",
+    )
+    L4 = await db_pool.fetchrow(
+        """INSERT INTO lessons (title, content, source_agent)
+           VALUES ('v6-bx-l4', 'c', 'claude') RETURNING id""",
+    )
+    await db_pool.execute(
+        """INSERT INTO backlog_analysis
+           (batch_run_id, lesson_a_id, lesson_b_id, cosine, verdict, confidence,
+            left_source_agent, right_source_agent)
+           VALUES ($1, $2, $3, 0.99, 'duplicate', 0.95, 'claude', 'claude')""",
+        batch_id, L3["id"], L4["id"],
+    )
+
+    try:
+        rows = await fetch_candidate_rows(
+            pool=db_pool, batch_run_id=batch_id,
+            verdict_in=["duplicate"], confidence_gte=0.90,
+        )
+        pair_sets = [{r["lesson_a_id"], r["lesson_b_id"]} for r in rows]
+        assert {L1["id"], L2["id"]} not in pair_sets, "cross-agent pair leaked"
+        assert {L3["id"], L4["id"]} in pair_sets, "same-agent pair missing"
+    finally:
+        await db_pool.execute(
+            "DELETE FROM backlog_analysis WHERE batch_run_id = $1", batch_id,
+        )
+        await db_pool.execute(
+            "DELETE FROM lessons WHERE id IN ($1, $2, $3, $4)",
+            L1["id"], L2["id"], L3["id"], L4["id"],
+        )
+```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `pytest tests/test_consolidation_cross_agent.py::test_fetch_candidate_rows_skips_cross_agent -v`
-Expected: FAIL — cross-agent pair appears.
+Run: `pytest tests/test_consolidation_cross_agent.py::test_fetch_candidate_rows_excludes_cross_agent -v`
+Expected: FAIL — cross-agent pair returned.
 
-- [ ] **Step 3: Modify the query**
+- [ ] **Step 3: Modify `fetch_candidate_rows`**
 
-In `src/tools/backlog_apply.py`, find `fetch_candidate_rows`'s SQL. Add `AND l1.source_agent = l2.source_agent` to the WHERE clause of the pair-selection query.
+In `src/tools/backlog_apply.py`, find the SQL in `fetch_candidate_rows`. Add to the main WHERE clause:
+
+```sql
+  AND ba.left_source_agent = ba.right_source_agent
+```
+
+(or equivalently: `AND NOT ba.cross_agent`)
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `pytest tests/test_consolidation_cross_agent.py -v`
-Expected: All tests PASS.
-
-Also run the existing backlog apply tests:
-Run: `pytest tests/test_backlog_pairs.py tests/test_apply_*.py -v`
-Expected: All previously-passing tests still pass.
+Run: `pytest tests/test_consolidation_cross_agent.py tests/test_apply_*.py tests/test_backlog_*.py -v`
+Expected: all PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/tools/backlog_apply.py tests/test_consolidation_cross_agent.py
-git commit -m "feat(v6): cross-agent skip in backlog apply candidate query"
+git commit -m "feat(v6): cross-agent skip in fetch_candidate_rows (backlog apply)"
 ```
 
 ---
 
-## Task 15: Backlog Analyzer — Tag Cross-Agent Pairs, Do Not Filter
+## Task 16: Optional `source_agent` Filter on Read Tools
 
 **Files:**
-- Modify: `src/consolidation/backlog.py`
-- Modify: `tests/test_consolidation_cross_agent.py`
+- Modify: `src/tools/search.py` (search, search_lessons)
+- Modify: `src/tools/journal.py` (read_journal)
+- Modify: `tests/test_rule_b.py`
 
-The v5.1 analyzer stays unfiltered. Each `backlog_analysis` row stores `left_source_agent` and `right_source_agent`; the `cross_agent` generated column was added by the migration.
+Per Decision #4 in the spec: reads return all agents by default, with an optional `source_agent` filter for inspection.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Identify the read tools and their current signatures**
 
-Append to `tests/test_consolidation_cross_agent.py`:
+```bash
+grep -n "async def search\|async def read_journal\|async def search_lessons" src/tools/search.py src/tools/journal.py src/tools/lessons.py
+```
+
+- [ ] **Step 2: Write the failing test**
+
+Append to `tests/test_rule_b.py`:
 
 ```python
 @pytest.mark.asyncio
-async def test_backlog_analyzer_does_not_filter_cross_agent(db_pool):
-    """The analyzer's pair query returns cross-agent pairs (we want them for investigation)."""
-    from src.consolidation.backlog import fetch_pairs_for_analysis
+async def test_search_lessons_filters_by_source_agent(db_pool, mock_openai):
+    from src.tools.lessons import search_lessons  # or src.tools.search
 
-    emb = "[" + ",".join(["0.1"] * 1536) + "]"
-    claude = await db_pool.fetchrow(
-        """INSERT INTO lessons (title, content, embedding, source_agent)
-           VALUES ('v6-analyzer-claude', 'shared', $1::vector, 'claude') RETURNING id""",
-        emb,
+    L_claude = await db_pool.fetchrow(
+        """INSERT INTO lessons (title, content, source_agent)
+           VALUES ('v6-filter-claude', 'unique-search-needle-9999', 'claude') RETURNING id""",
     )
-    codex = await db_pool.fetchrow(
-        """INSERT INTO lessons (title, content, embedding, source_agent)
-           VALUES ('v6-analyzer-codex', 'shared', $1::vector, 'codex') RETURNING id""",
-        emb,
+    L_codex = await db_pool.fetchrow(
+        """INSERT INTO lessons (title, content, source_agent)
+           VALUES ('v6-filter-codex', 'unique-search-needle-9999', 'codex') RETURNING id""",
     )
     try:
-        pairs = await fetch_pairs_for_analysis(pool=db_pool, cosine_threshold=0.85)
-        # Find the cross-agent pair (if it exists in the result set)
-        cross_pair = next(
-            (p for p in pairs
-             if {p["left_id"], p["right_id"]} == {claude["id"], codex["id"]}),
-            None,
+        result = await search_lessons(
+            query="unique-search-needle-9999",
+            source_agent="codex",
+            ctx=_ctx(db_pool, mock_openai),
         )
-        assert cross_pair is not None, "analyzer missed the cross-agent pair"
-        assert cross_pair["left_source_agent"] != cross_pair["right_source_agent"]
+        payload = _json.loads(result)
+        ids = {r["id"] for r in payload.get("results", [])}
+        assert L_codex["id"] in ids
+        assert L_claude["id"] not in ids
     finally:
         await db_pool.execute(
-            "DELETE FROM lessons WHERE id IN ($1, $2)", claude["id"], codex["id"],
+            "DELETE FROM lessons WHERE id IN ($1, $2)", L_claude["id"], L_codex["id"],
         )
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 3: Run test to verify it fails**
 
-Run: `pytest tests/test_consolidation_cross_agent.py::test_backlog_analyzer_does_not_filter_cross_agent -v`
-Expected: FAIL — the analyzer's SELECT either misses cross-agent pairs or doesn't return `left_source_agent`/`right_source_agent`.
+Run: `pytest tests/test_rule_b.py -v -k "filters_by_source_agent"`
+Expected: FAIL — `search_lessons` doesn't accept `source_agent`.
 
-- [ ] **Step 3: Modify the analyzer query**
+- [ ] **Step 4: Add optional `source_agent` filter to each read tool**
 
-In `src/consolidation/backlog.py`, find the SELECT that picks pairs. The query already self-joins lessons with itself; extend the SELECT clause to include `l1.source_agent AS left_source_agent, l2.source_agent AS right_source_agent`. **Do not** add a source_agent equality filter — pairs across agents must remain visible for the investigation goal.
+For `search_lessons` (and the unified `search` tool, and `read_journal`):
 
-When inserting analyzed pairs into `backlog_analysis`, include both source_agent values. The `cross_agent` column is generated automatically.
+```python
+async def search_lessons(
+    query: str,
+    # ... existing params ...
+    source_agent: str = None,    # NEW: filter by agent family
+    ctx: Context = None,
+) -> str:
+    # In the SQL, conditionally add: AND ($N::text IS NULL OR source_agent = $N)
+```
 
-- [ ] **Step 4: Run tests to verify they pass**
+Apply to: `search`, `search_lessons`, `read_journal`. Optional — defaults to None (no filter).
 
-Run: `pytest tests/test_consolidation_cross_agent.py -v`
-Expected: All tests PASS.
+- [ ] **Step 5: Run tests to verify they pass**
 
-- [ ] **Step 5: Commit**
+Run: `pytest tests/test_rule_b.py -v -k "filters_by_source_agent"`
+Expected: PASS.
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src/consolidation/backlog.py tests/test_consolidation_cross_agent.py
-git commit -m "feat(v6): analyzer keeps cross-agent pairs; tags left/right source_agent"
+git add src/tools/search.py src/tools/lessons.py src/tools/journal.py tests/test_rule_b.py
+git commit -m "feat(v6): optional source_agent filter on search/read_journal"
 ```
 
 ---
 
-## Task 16: Admin Scripts — Issue, Revoke, List API Keys
+## Task 17: Admin Scripts — Issue / Revoke / List API Keys
 
 **Files:**
-- Create: `scripts/issue_api_key.py`
-- Create: `scripts/revoke_api_key.py`
-- Create: `scripts/list_api_keys.py`
+- Create: `scripts/issue_api_key.py`, `scripts/revoke_api_key.py`, `scripts/list_api_keys.py`
 - Create: `tests/test_admin_scripts.py`
 
-- [ ] **Step 1: Write the failing test for issue_api_key**
+- [ ] **Step 1: Write the failing test**
 
 Create `tests/test_admin_scripts.py`:
 
 ```python
-"""Tests for scripts/issue_api_key.py — verifies side-effects on the DB."""
+"""End-to-end tests for the admin scripts."""
 
 import hashlib
+import os
 import subprocess
 import sys
-import os
 
 import pytest
 
 
-@pytest.mark.asyncio
-async def test_issue_api_key_creates_row(db_pool):
-    """Running the script inserts an api_keys row with hashed bearer."""
+def _env_with_dsn():
     env = os.environ.copy()
     env["DATABASE_URL"] = os.getenv(
         "TEST_DATABASE_URL",
         "postgresql://claude:claude@localhost:5434/claude_memory_test",
     )
+    return env
 
+
+@pytest.mark.asyncio
+async def test_issue_api_key_creates_row(db_pool):
     result = subprocess.run(
-        [
-            sys.executable, "scripts/issue_api_key.py",
-            "--family", "codex",
-            "--label", "test-script-issuance",
-            "--client-name", "codex-cli",
-        ],
-        capture_output=True, text=True, env=env, check=True,
+        [sys.executable, "scripts/issue_api_key.py",
+         "--family", "codex",
+         "--label", "test-script-issuance",
+         "--client-name", "codex-cli"],
+        capture_output=True, text=True, env=_env_with_dsn(), check=True,
     )
-
-    # Bearer is printed on a line starting with "Bearer token" or contains 64 hex chars
-    lines = result.stdout.split("\n")
-    bearer = None
-    for line in lines:
-        line = line.strip()
-        if len(line) == 64 and all(c in "0123456789abcdef" for c in line):
-            bearer = line
-            break
-    assert bearer is not None, f"Bearer not found in output: {result.stdout}"
+    bearer = next(
+        (line.strip() for line in result.stdout.split("\n")
+         if len(line.strip()) == 64 and all(c in "0123456789abcdef" for c in line.strip())),
+        None,
+    )
+    assert bearer, result.stdout
 
     h = hashlib.sha256(bearer.encode()).hexdigest()
     row = await db_pool.fetchrow(
@@ -2155,24 +2594,47 @@ async def test_issue_api_key_creates_row(db_pool):
     assert row["client_name"] == "codex-cli"
 
     await db_pool.execute("DELETE FROM api_keys WHERE api_key_hash = $1", h)
+
+
+@pytest.mark.asyncio
+async def test_revoke_api_key_by_label(db_pool):
+    raw = "revoke-test-bearer"
+    h = hashlib.sha256(raw.encode()).hexdigest()
+    await db_pool.execute(
+        """INSERT INTO api_keys (api_key_hash, family, label)
+           VALUES ($1, 'codex', 'revoke-test')""",
+        h,
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "scripts/revoke_api_key.py", "--label", "revoke-test"],
+            capture_output=True, text=True, env=_env_with_dsn(), check=True,
+        )
+        assert "Revoked" in result.stdout
+        row = await db_pool.fetchrow(
+            "SELECT revoked_at FROM api_keys WHERE api_key_hash = $1", h,
+        )
+        assert row["revoked_at"] is not None
+    finally:
+        await db_pool.execute("DELETE FROM api_keys WHERE api_key_hash = $1", h)
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `pytest tests/test_admin_scripts.py -v`
-Expected: FAIL — `scripts/issue_api_key.py` does not exist.
+Expected: FAIL — scripts don't exist.
 
 - [ ] **Step 3: Implement `scripts/issue_api_key.py`**
 
 ```python
 #!/usr/bin/env python3
-"""Issue a new API key for the claude-memory MCP server.
+"""Issue a new API key.
 
 Usage:
     python scripts/issue_api_key.py --family codex --label "Brian Codex laptop" \\
         [--client-name codex-cli] [--scopes read write]
 
-Prints the raw bearer once to stdout. The DB stores only the sha256 hash.
+Prints the raw bearer once to stdout. DB stores only the sha256 hash.
 """
 
 import argparse
@@ -2185,13 +2647,13 @@ import sys
 import asyncpg
 
 
-async def main(args: argparse.Namespace) -> int:
+async def main(args):
     raw = secrets.token_hex(32)
     h = hashlib.sha256(raw.encode()).hexdigest()
 
-    dsn = os.environ.get("DATABASE_URL") or os.environ.get("TEST_DATABASE_URL")
+    dsn = os.environ.get("DATABASE_URL")
     if not dsn:
-        print("Set DATABASE_URL or TEST_DATABASE_URL.", file=sys.stderr)
+        print("Set DATABASE_URL.", file=sys.stderr)
         return 1
 
     conn = await asyncpg.connect(dsn)
@@ -2219,43 +2681,28 @@ async def main(args: argparse.Namespace) -> int:
 
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--family", required=True, help="Agent family (claude, codex, etc.)")
-    p.add_argument("--label", required=True, help="Human-readable label")
-    p.add_argument("--client-name", default=None, help="Client name (e.g., codex-cli)")
-    p.add_argument(
-        "--scopes", nargs="+", default=["read", "write"],
-        help="Scopes for this token (default: read write)",
-    )
-    args = p.parse_args()
-    sys.exit(asyncio.run(main(args)))
+    p = argparse.ArgumentParser()
+    p.add_argument("--family", required=True)
+    p.add_argument("--label", required=True)
+    p.add_argument("--client-name", default=None)
+    p.add_argument("--scopes", nargs="+", default=["read", "write"])
+    sys.exit(asyncio.run(main(p.parse_args())))
 ```
-
-Make it executable: `chmod +x scripts/issue_api_key.py`.
 
 - [ ] **Step 4: Implement `scripts/revoke_api_key.py`**
 
 ```python
 #!/usr/bin/env python3
-"""Revoke an API key by id or label.
+"""Revoke an API key by id or label."""
 
-Usage:
-    python scripts/revoke_api_key.py --id 7
-    python scripts/revoke_api_key.py --label "Brian Codex laptop"
-"""
-
-import argparse
-import asyncio
-import os
-import sys
-
+import argparse, asyncio, os, sys
 import asyncpg
 
 
-async def main(args: argparse.Namespace) -> int:
-    dsn = os.environ.get("DATABASE_URL") or os.environ.get("TEST_DATABASE_URL")
+async def main(args):
+    dsn = os.environ.get("DATABASE_URL")
     if not dsn:
-        print("Set DATABASE_URL or TEST_DATABASE_URL.", file=sys.stderr)
+        print("Set DATABASE_URL.", file=sys.stderr)
         return 1
     if not (args.id or args.label):
         print("Provide --id or --label.", file=sys.stderr)
@@ -2266,14 +2713,12 @@ async def main(args: argparse.Namespace) -> int:
         if args.id:
             result = await conn.execute(
                 "UPDATE api_keys SET revoked_at = NOW() "
-                "WHERE id = $1 AND revoked_at IS NULL",
-                args.id,
+                "WHERE id = $1 AND revoked_at IS NULL", args.id,
             )
         else:
             result = await conn.execute(
                 "UPDATE api_keys SET revoked_at = NOW() "
-                "WHERE label = $1 AND revoked_at IS NULL",
-                args.label,
+                "WHERE label = $1 AND revoked_at IS NULL", args.label,
             )
     finally:
         await conn.close()
@@ -2287,35 +2732,26 @@ async def main(args: argparse.Namespace) -> int:
 
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--id", type=int, help="api_keys.id")
-    p.add_argument("--label", help="api_keys.label")
-    args = p.parse_args()
-    sys.exit(asyncio.run(main(args)))
+    p = argparse.ArgumentParser()
+    p.add_argument("--id", type=int)
+    p.add_argument("--label")
+    sys.exit(asyncio.run(main(p.parse_args())))
 ```
 
 - [ ] **Step 5: Implement `scripts/list_api_keys.py`**
 
 ```python
 #!/usr/bin/env python3
-"""List all api_keys with status.
+"""List api_keys with status."""
 
-Usage:
-    python scripts/list_api_keys.py [--include-revoked]
-"""
-
-import argparse
-import asyncio
-import os
-import sys
-
+import argparse, asyncio, os, sys
 import asyncpg
 
 
-async def main(args: argparse.Namespace) -> int:
-    dsn = os.environ.get("DATABASE_URL") or os.environ.get("TEST_DATABASE_URL")
+async def main(args):
+    dsn = os.environ.get("DATABASE_URL")
     if not dsn:
-        print("Set DATABASE_URL or TEST_DATABASE_URL.", file=sys.stderr)
+        print("Set DATABASE_URL.", file=sys.stderr)
         return 1
 
     conn = await asyncpg.connect(dsn)
@@ -2337,149 +2773,113 @@ async def main(args: argparse.Namespace) -> int:
     print("-" * 100)
     for r in rows:
         status = "REVOKED" if r["revoked_at"] else "active"
-        last_seen = r["last_seen_at"].isoformat(timespec="seconds") if r["last_seen_at"] else "never"
-        print(
-            f"{r['id']:<4} {r['family']:<8} {(r['label'] or ''):<40} "
-            f"{last_seen:<20} {status}"
-        )
+        last = r["last_seen_at"].isoformat(timespec="seconds") if r["last_seen_at"] else "never"
+        print(f"{r['id']:<4} {r['family']:<8} {(r['label'] or ''):<40} {last:<20} {status}")
     return 0
 
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser(description=__doc__)
+    p = argparse.ArgumentParser()
     p.add_argument("--include-revoked", action="store_true")
-    args = p.parse_args()
-    sys.exit(asyncio.run(main(args)))
+    sys.exit(asyncio.run(main(p.parse_args())))
 ```
 
-- [ ] **Step 6: Run tests to verify they pass**
-
-Run: `pytest tests/test_admin_scripts.py -v`
-Expected: PASS.
-
-- [ ] **Step 7: Smoke-test the scripts manually**
-
-```bash
-TEST_DATABASE_URL='postgresql://claude:claude@localhost:5434/claude_memory_test' \
-    python scripts/issue_api_key.py --family codex --label "smoke test" --client-name codex-cli
-# copy the bearer from the output
-
-TEST_DATABASE_URL='postgresql://claude:claude@localhost:5434/claude_memory_test' \
-    python scripts/list_api_keys.py
-# verify the new row appears
-
-TEST_DATABASE_URL='postgresql://claude:claude@localhost:5434/claude_memory_test' \
-    python scripts/revoke_api_key.py --label "smoke test"
-
-TEST_DATABASE_URL='postgresql://claude:claude@localhost:5434/claude_memory_test' \
-    python scripts/list_api_keys.py --include-revoked
-# verify status=REVOKED
-```
-
-- [ ] **Step 8: Commit**
+- [ ] **Step 6: Make scripts executable + run tests**
 
 ```bash
 chmod +x scripts/issue_api_key.py scripts/revoke_api_key.py scripts/list_api_keys.py
-git add scripts/issue_api_key.py scripts/revoke_api_key.py scripts/list_api_keys.py tests/test_admin_scripts.py
+pytest tests/test_admin_scripts.py -v
+```
+
+Expected: all PASS.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add scripts/ tests/test_admin_scripts.py
 git commit -m "feat(v6): admin scripts to issue/revoke/list api_keys"
 ```
 
 ---
 
-## Task 17: `list_clients` MCP Admin Tool
+## Task 18: `list_clients` MCP Tool
 
 **Files:**
 - Modify: `src/tools/admin.py`
 - Modify: `tests/test_rule_b.py`
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing tests**
 
 Append to `tests/test_rule_b.py`:
 
 ```python
 @pytest.mark.asyncio
 async def test_list_clients_requires_admin(db_pool):
-    """list_clients without admin scope raises PermissionError."""
     from src.tools.admin import list_clients
-    from src.server import AppContext
-    from unittest.mock import MagicMock
-
     set_identity(Identity(
         family="claude", client_id="apikey:7",
         scopes=["read", "write"], source="apikey",
     ))
-    ctx = MagicMock()
-    ctx.request_context.lifespan_context = AppContext(
-        db=db_pool, openai=MagicMock(), anthropic=MagicMock(),
-    )
-
     with pytest.raises(PermissionError):
-        await list_clients(ctx=ctx)
+        await list_clients(ctx=_ctx(db_pool))
 
 
 @pytest.mark.asyncio
-async def test_list_clients_returns_both_paths(db_pool):
-    """list_clients with admin returns rows from api_keys and oauth_clients."""
+async def test_list_clients_returns_api_keys_and_oauth(db_pool):
     from src.tools.admin import list_clients
-    from src.server import AppContext
-    from unittest.mock import MagicMock
-    import json as _json
     import hashlib
 
-    # Seed one api_keys row
-    raw = "list-clients-test-bearer"
+    raw = "list-clients-bearer"
     h = hashlib.sha256(raw.encode()).hexdigest()
     key = await db_pool.fetchrow(
-        """INSERT INTO api_keys (api_key_hash, family, label) VALUES ($1, 'codex', 'list-test')
-           RETURNING id""",
+        """INSERT INTO api_keys (api_key_hash, family, label)
+           VALUES ($1, 'codex', 'list-test') RETURNING id""",
         h,
+    )
+    await db_pool.execute(
+        """INSERT INTO oauth_clients (client_id, client_secret, client_name,
+                                       token_endpoint_auth_method, client_id_issued_at, raw_data)
+           VALUES ('client_list_test', 'sec', 'claude-code-test', 'none',
+                   extract(epoch from NOW())::bigint, '{}'::jsonb)
+           ON CONFLICT (client_id) DO NOTHING""",
     )
 
     set_identity(Identity(
         family="claude", client_id="apikey:99",
         scopes=["read", "write", "admin"], source="apikey",
     ))
-    ctx = MagicMock()
-    ctx.request_context.lifespan_context = AppContext(
-        db=db_pool, openai=MagicMock(), anthropic=MagicMock(),
-    )
-
     try:
-        result = await list_clients(ctx=ctx)
+        result = await list_clients(ctx=_ctx(db_pool))
         payload = _json.loads(result)
         sources = {r["source"] for r in payload["clients"]}
         assert "api_key" in sources
-        # OAuth row presence depends on whether any oauth_clients exist in test DB; not asserted.
-        api_key_rows = [r for r in payload["clients"] if r["source"] == "api_key"]
-        assert any(r["label"] == "list-test" for r in api_key_rows)
+        assert "oauth" in sources
+        assert any(
+            r["source"] == "api_key" and r["label"] == "list-test"
+            for r in payload["clients"]
+        )
     finally:
         await db_pool.execute("DELETE FROM api_keys WHERE id = $1", key["id"])
+        await db_pool.execute("DELETE FROM oauth_clients WHERE client_id = 'client_list_test'")
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `pytest tests/test_rule_b.py -v -k list_clients`
-Expected: FAIL — `list_clients` doesn't exist.
+Run: `pytest tests/test_rule_b.py -v -k "list_clients"`
+Expected: FAIL — `list_clients` not defined.
 
 - [ ] **Step 3: Implement `list_clients`**
 
-In `src/tools/admin.py`, add:
+Append to `src/tools/admin.py`:
 
 ```python
-import json
-
-from mcp.server.fastmcp import Context
-
-from src.server import mcp
-from src.identity import require_admin
-
-
 @mcp.tool()
 async def list_clients(ctx: Context = None) -> str:
     """List all known MCP clients (api_keys + OAuth) with family and status.
 
     Admin scope required.
     """
+    from src.identity import require_admin
     require_admin()
     app = ctx.request_context.lifespan_context
 
@@ -2489,8 +2889,7 @@ async def list_clients(ctx: Context = None) -> str:
            FROM api_keys ORDER BY id"""
     )
     oauth_rows = await app.db.fetch(
-        """SELECT c.client_id, c.client_name, c.client_id_issued_at,
-                  f.family
+        """SELECT c.client_id, c.client_name, c.client_id_issued_at, f.family
            FROM oauth_clients c
            LEFT JOIN oauth_client_family f ON f.client_id = c.client_id
            ORDER BY c.client_id_issued_at"""
@@ -2521,21 +2920,23 @@ async def list_clients(ctx: Context = None) -> str:
     return json.dumps({"clients": out})
 ```
 
+(Add `import json` at the top of the file if not present.)
+
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `pytest tests/test_rule_b.py -v -k list_clients`
-Expected: PASS.
+Run: `pytest tests/test_rule_b.py -v -k "list_clients"`
+Expected: both PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/tools/admin.py tests/test_rule_b.py
-git commit -m "feat(v6): list_clients MCP tool (admin-scoped)"
+git commit -m "feat(v6): list_clients admin MCP tool"
 ```
 
 ---
 
-## Task 18: Verify Full Test Suite + Manual Smoke
+## Task 19: Full Test Suite + Manual Smoke
 
 **Files:** none (verification only)
 
@@ -2547,102 +2948,98 @@ sleep 2
 pytest tests/ -v
 ```
 
-Expected: All tests pass. If anything from v5 / v5.1 / v5.2 broke, fix the root cause (most likely a tool that calls `find_candidates` or a `consolidate_at_log` invocation that doesn't pass `new_source_agent`).
+Expected: all PASS. Any regression must be root-caused — most likely either a stale `find_candidates` call site missing the new required `source_agent` arg, or a tool that now requires identity but hasn't been updated.
 
-- [ ] **Step 2: Manual end-to-end smoke against local server**
-
-Run the dev server locally and confirm an end-to-end flow:
+- [ ] **Step 2: Manual end-to-end smoke (local)**
 
 ```bash
-# Apply migration to local dev DB if running locally; otherwise use prod-mirror.
-# Start the server (in another terminal):
-TEST_DATABASE_URL=... uvicorn src.server:app --port 8003
+# Apply migration locally (if not already done in pre-flight)
+PGPASSWORD=claude psql -h localhost -p 5434 -U claude -d claude_memory_test \
+    -f db/migrations/v6_attribution.sql
 
-# Issue a Codex token against the dev DB:
-python scripts/issue_api_key.py --family codex --label "smoke codex" --client-name codex-cli
+# Start server pointed at test DB
+TEST_DATABASE_URL='postgresql://claude:claude@localhost:5434/claude_memory_test' \
+DATABASE_URL='postgresql://claude:claude@localhost:5434/claude_memory_test' \
+API_KEY='smoke-key' OPENAI_API_KEY=sk-dummy ANTHROPIC_API_KEY=sk-dummy \
+    uvicorn src.server:app --port 8003 &
+SERVER_PID=$!
+sleep 3
 
-# Use the bearer to hit the server:
-curl -H "Authorization: Bearer <bearer>" http://localhost:8003/health
-# Expected: {"status":"healthy","service":"claude-memory"}
+# Issue a Codex test token
+DATABASE_URL='postgresql://claude:claude@localhost:5434/claude_memory_test' \
+    python scripts/issue_api_key.py --family codex --label "smoke" --client-name codex-cli
 
-# Use an MCP client (e.g., claude code with a temporary mcp.json) to log a lesson;
-# verify the row's source_agent='codex' in psql.
+# Health check
+curl -s http://localhost:8003/health
 
-psql -h localhost -p 5434 -U claude claude_memory_test \
-    -c "SELECT id, title, source_agent, source_client_id
-        FROM lessons ORDER BY id DESC LIMIT 5;"
+# (Optional) MCP client smoke test against the bearer
+
+kill $SERVER_PID
 ```
 
-Expected: The newly-logged lesson has `source_agent='codex'`.
+Expected: `{"status":"healthy","service":"claude-memory"}` from health; bearer printed by the script.
 
-- [ ] **Step 3: Commit (if any fixes were needed)**
+- [ ] **Step 3: Commit any fixes**
 
 ```bash
 git add -u
-git commit -m "fix(v6): test-suite green after attribution rollout"
+git commit -m "fix(v6): test-suite green after attribution rollout" || echo "nothing to commit"
 ```
-
-If no changes: skip the commit.
 
 ---
 
-## Task 19: Production Deployment + Rotation Plan
+## Task 20: Production Deployment + Rotation
 
 **Files:** none (operational)
 
-This is the operational cutover, not code. Follow this order:
-
-- [ ] **Step 1: Backup prod DB**
+- [ ] **Step 1: Back up prod DB**
 
 ```bash
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@52.201.241.106 \
-    "cd ~/claude-memory && docker exec claude_memory_db pg_dump -U claude claude_memory > backup_pre_v6.sql"
+ssh -i ~/.ssh/AWS_FR.pem ubuntu@ec2-44-212-169-119.compute-1.amazonaws.com \
+    "cd ~/claude-memory && docker exec claude_memory_db pg_dump -U claude claude_memory > backup_pre_v6.sql && ls -la backup_pre_v6.sql"
 ```
+
+Confirm backup file exists and is non-trivial size.
 
 - [ ] **Step 2: Apply migration to prod**
 
 ```bash
-scp -i ~/.ssh/AWS_FR.pem migrations/004_v6_attribution.sql \
-    ubuntu@52.201.241.106:~/claude-memory/migrations/
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@52.201.241.106 \
-    "cd ~/claude-memory && docker exec -i claude_memory_db psql -U claude -d claude_memory < migrations/004_v6_attribution.sql"
+scp -i ~/.ssh/AWS_FR.pem db/migrations/v6_attribution.sql \
+    ubuntu@ec2-44-212-169-119.compute-1.amazonaws.com:~/claude-memory/db/migrations/
+ssh -i ~/.ssh/AWS_FR.pem ubuntu@ec2-44-212-169-119.compute-1.amazonaws.com \
+    "cd ~/claude-memory && docker exec -i claude_memory_db psql -U claude -d claude_memory < db/migrations/v6_attribution.sql"
 ```
 
-Expected: A series of ALTER TABLE + CREATE TABLE confirmations.
+Expected: ALTER/CREATE confirmations, COMMIT at end.
 
-- [ ] **Step 3: Deploy the new server build**
+- [ ] **Step 3: Deploy new server build**
 
 ```bash
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@52.201.241.106 \
+ssh -i ~/.ssh/AWS_FR.pem ubuntu@ec2-44-212-169-119.compute-1.amazonaws.com \
     "cd ~/claude-memory && git pull && docker-compose up -d --build"
-```
-
-- [ ] **Step 4: Verify the server is healthy and identity resolves**
-
-```bash
+sleep 5
 curl https://memory.friendly-robots.com/health
-# Expected: {"status":"healthy","service":"claude-memory"}
-
-# Tail logs for "DEPRECATION: legacy API_KEY" — should appear on the first
-# request from any existing client (they're still on the legacy bearer).
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@52.201.241.106 \
-    "docker logs claude_memory_mcp --tail 100"
 ```
 
-- [ ] **Step 5: Issue Codex token (prod)**
+Expected: healthy. Tail logs for any startup errors.
+
+- [ ] **Step 4: Issue Codex prod token**
 
 ```bash
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@52.201.241.106 \
-    "cd ~/claude-memory && DATABASE_URL='postgresql://claude:claude@db:5432/claude_memory' \
+ssh -i ~/.ssh/AWS_FR.pem ubuntu@ec2-44-212-169-119.compute-1.amazonaws.com \
+    "cd ~/claude-memory && docker exec -i claude_memory_mcp \
+     env DATABASE_URL='postgresql://claude:claude@db:5432/claude_memory' \
      python scripts/issue_api_key.py \
-       --family codex \
-       --label 'Brian Codex laptop' \
-       --client-name codex-cli"
+       --family codex --label 'Brian Codex laptop' --client-name codex-cli"
 ```
 
-Securely capture the bearer. Set on the Codex host: `export CODEX_MEMORY_TOKEN=<bearer>`.
+Capture the bearer (shown once). Set on Codex host:
 
-Configure Codex's MCP TOML:
+```bash
+echo 'export CODEX_MEMORY_TOKEN=<bearer>' >> ~/.zshrc
+```
+
+Configure Codex MCP TOML:
 
 ```toml
 [mcp_servers.claude-memory]
@@ -2650,56 +3047,52 @@ url = "https://memory.friendly-robots.com/mcp"
 bearer_token_env_var = "CODEX_MEMORY_TOKEN"
 ```
 
-Verify Codex can call `search()` against the MCP server.
+Smoke-test: have Codex call `search()` and verify a response.
 
-- [ ] **Step 6: Issue per-machine Claude tokens (prod, one per machine)**
+- [ ] **Step 5: Issue per-machine Claude tokens**
 
-For each machine (Mac Studio shared, slmbeast, work laptop):
+For each machine (Mac Studio, slmbeast, work laptop):
 
 ```bash
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@52.201.241.106 \
-    "cd ~/claude-memory && DATABASE_URL='postgresql://claude:claude@db:5432/claude_memory' \
+ssh -i ~/.ssh/AWS_FR.pem ubuntu@ec2-44-212-169-119.compute-1.amazonaws.com \
+    "docker exec -i claude_memory_mcp \
+     env DATABASE_URL='postgresql://claude:claude@db:5432/claude_memory' \
      python scripts/issue_api_key.py \
-       --family claude \
-       --label 'Brian Claude mac-studio' \
-       --client-name claude-mac-studio"
+       --family claude --label 'Brian Claude <machine>' --client-name 'claude-<machine>'"
 ```
 
-(Repeat with appropriate labels for `slmbeast`, `work-laptop`, etc.)
-
-On each machine: set `CLAUDE_MEMORY_TOKEN=<bearer>` in the appropriate shell env (e.g., `~/.zshrc` on macOS), then update the MCP config to use the env var instead of the inline bearer.
-
-For `claude_desktop_config.json` (which uses `mcp-remote` via `npx`), the simplest pattern is a shell wrapper:
+For each machine: set `CLAUDE_MEMORY_TOKEN=<that machine's bearer>` in shell env, then update `claude_desktop_config.json` / `~/.claude/` mcp configs to use a shell wrapper that reads the env var:
 
 ```json
 {
   "mcpServers": {
     "claude-memory": {
       "command": "sh",
-      "args": ["-c", "npx -y mcp-remote@latest https://memory.friendly-robots.com/mcp --header \"Authorization:Bearer $CLAUDE_MEMORY_TOKEN\""]
+      "args": [
+        "-c",
+        "npx -y mcp-remote@latest https://memory.friendly-robots.com/mcp --header \"Authorization:Bearer $CLAUDE_MEMORY_TOKEN\""
+      ]
     }
   }
 }
 ```
 
-(Verify Claude Desktop spawns `sh` with the parent env — if not, fall back to inlining the new bearer in the config.)
+If Claude Desktop's spawned shell doesn't inherit env, fall back to inlining the new bearer in the config (still per-machine — different bearer on each machine).
 
-Test connectivity from each machine (a single `search()` call).
+Test connectivity (a single `search()` call) from each machine before deleting the old config.
 
-- [ ] **Step 7: Monitor for 7 days**
+- [ ] **Step 6: Monitor**
 
 ```bash
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@52.201.241.106 \
-    "docker logs claude_memory_mcp --since 7d 2>&1 | grep DEPRECATION | wc -l"
+ssh -i ~/.ssh/AWS_FR.pem ubuntu@ec2-44-212-169-119.compute-1.amazonaws.com \
+    "docker logs claude_memory_mcp --since 24h 2>&1 | grep DEPRECATION | wc -l"
 ```
 
-When this count is 0 for 7 consecutive days, proceed to step 8.
+When this count is 0 for 7 consecutive days, proceed to step 7.
 
-- [ ] **Step 8: Retire legacy API_KEY**
+- [ ] **Step 7: Retire legacy API_KEY path**
 
-In `src/identity.py`, remove the `# 1. Legacy API_KEY path` branch of `resolve_identity`. Remove the `LEGACY_API_KEY` module-level constant. Update `src/auth.py`'s `load_access_token` to remove the `if token == self.api_key:` branch.
-
-Rotate the actual `API_KEY` env var in prod (`docker-compose.yml` or env file) to a new random value — anything using the old value now fails with 401 instead of being accepted with stamped attribution.
+In `src/identity.py`, remove the legacy branch from `resolve_identity` and the `LEGACY_API_KEY` constant. In `src/auth.py`'s `load_access_token`, remove the `if token == self.api_key:` block. Rotate the `API_KEY` env var in prod (any client still using it will now get 401).
 
 ```bash
 git add src/identity.py src/auth.py
@@ -2707,30 +3100,33 @@ git commit -m "chore(v6): retire legacy API_KEY back-compat path"
 git push
 ```
 
-Then redeploy and verify everything still works.
+Then redeploy and verify all configured clients still work via api_keys/OAuth.
 
 ---
 
 ## Self-Review
 
-Spec coverage:
-- Identity granularity (Hybrid family + raw client_id) — Task 1 schema, Tasks 2–4 resolver.
-- Cross-agent write permissions (Rule b) — Tasks 6, 11.
-- Owned/shared categorization — Task 6 (`OWNED_CONTENT_TABLES` / `SHARED_METADATA_TABLES` sets).
-- Consolidation skip scope — Tasks 13 (log-time), 14 (backlog apply), 15 (analyzer tags but doesn't filter).
-- Codex onboarding via api_keys — Tasks 1 (schema), 3 (resolver branch), 16 (scripts), 19 (production deploy + token issuance).
-- Admin scope on merge/resolve — Task 12.
-- Unknown OAuth DCR lenient — Task 4 (resolver inserts `unknown`).
-- Per-machine Claude tokens — Task 19 step 6.
-- `list_clients` admin tool — Task 17.
-- Legacy API_KEY retirement — Task 19 step 8.
+**Spec coverage:**
+- Identity granularity (hybrid family + raw client_id) — Tasks 1 (schema), 2–4 (resolver).
+- Cross-agent write permissions (rule b) — Tasks 6 (helpers), 11 (enforcement).
+- Owned/shared categorization — Task 6 (table sets).
+- Consolidation skip — Tasks 13 (log-time), 14 (analyzer records), 15 (apply filters).
+- Codex onboarding — Tasks 1, 3, 17 (scripts), 20 (prod issuance).
+- Admin scope — Task 12.
+- Unknown OAuth lenient — Task 4 (resolver inserts `unknown`).
+- Per-machine Claude — Task 20 step 5.
+- `list_clients` admin tool — Task 18.
+- Legacy retirement — Task 20 step 7.
+- Optional `source_agent` filter on reads — Task 16.
 
-Placeholder scan: no TBD / "implement later" / "similar to Task N" found. All code blocks contain actual content.
+**Placeholder scan:** No "TBD" / "implement later" / "similar to Task N" remaining; every step has actual code or commands.
 
-Type consistency: `Identity` dataclass shape consistent across Tasks 2, 3, 4, 5, 6, 11, 12, 17. `stamp()` returns `(str, Optional[str])` consistently. `assert_can_write(pool, table, row_id)` signature consistent.
+**Type consistency:**
+- `Identity` shape consistent across Tasks 2, 3, 4, 5, 6, 7+.
+- `stamp() -> tuple[str, Optional[str]]` consistent.
+- `assert_can_write(pool, table, row_id)` signature stable.
+- `find_candidates(...)` requires `source_agent` from Task 13 onward; Task 13 step 5 updates all known call sites.
 
-Open items deferred to implementation by design:
-1. Existence of a separate `lesson_ratings` table — handled inline in Task 7 step 5 (check first, add column only if needed).
-2. `project_state` history vs upsert — Task 10 step 3 covers UPSERT pattern; if v2 history exists, the pattern extends naturally.
-3. Per-request identity plumbing chose ContextVar (Task 2 step 3, Task 5 step 3); decision locked.
-4. `mcp-remote` env-var substitution — Task 19 step 6 includes a shell-wrapper fallback.
+**Risks called out:**
+- Task 0 (ContextVar spike) is a gating risk. If it fails, Task 5 forks to a `request.state` middleware design and downstream tasks need a small adjustment to `stamp()` / `assert_can_write()` to take a `request`/`ctx` argument. The plan flags this as a stop-and-replan condition.
+- Per-machine Claude config update (Task 20 step 5) depends on `mcp-remote`/Claude Desktop env-var behavior. The shell wrapper is the fallback; inline-bearer is the fallback's fallback.
