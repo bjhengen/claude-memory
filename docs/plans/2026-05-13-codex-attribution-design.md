@@ -313,17 +313,19 @@ Suggested env var name: CODEX_MEMORY_TOKEN
 
 ### Claude migration (per-machine api_keys rows)
 
-For each Claude client across the fleet:
+Each machine gets **one shared Claude token** used by all Claude clients on that machine (Claude Desktop + Claude Code + any future Claude client share the same bearer). One row per machine in `api_keys`, not one per client. Per-machine revocation is the goal; per-client distinction is not.
 
-1. Run `scripts/issue_api_key.py --family claude --label "Brian Claude <machine>" --client-name "claude-code-<machine>"` (or `claude-desktop-<machine>`).
-2. Set per-machine env var (e.g., `CLAUDE_MEMORY_TOKEN_MAC_STUDIO`, or just `CLAUDE_MEMORY_TOKEN` if each machine sets it independently).
+For each machine across the fleet:
+
+1. Run `scripts/issue_api_key.py --family claude --label "Brian Claude <machine>" --client-name "claude-<machine>"`.
+2. Set the per-machine env var on that machine (e.g., `CLAUDE_MEMORY_TOKEN` set locally on each machine — same env-var name everywhere, different bearer value per machine).
 3. Replace inline `Authorization: Bearer <old-shared>` in `claude_desktop_config.json` and `~/.claude/` configs with a setup that consumes the env var. For `mcp-remote` invocations, the exact mechanism depends on how `mcp-remote` accepts headers — likely a small shell wrapper that reads the env var and constructs the `--header` argument.
 4. Verify connectivity (a search call against the MCP server) before deleting the old config.
 
 Machines in scope (confirmed by operator):
-- Mac Studio: Claude Desktop + Claude Code
-- slmbeast: Claude Code
-- Work laptop: Claude Code
+- Mac Studio (shared token for Claude Desktop + Claude Code)
+- slmbeast (Claude Code)
+- Work laptop (Claude Code)
 - Any other machine the operator identifies during rollout
 
 ### Legacy API_KEY retirement
