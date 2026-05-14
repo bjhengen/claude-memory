@@ -152,3 +152,91 @@ async def resolve_identity(pool: asyncpg.Pool, bearer: str) -> Optional[Identity
         )
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# Write-stamp + rule-b + admin
+# ---------------------------------------------------------------------------
+
+# Tables with `id` PK + source_agent where rule b applies.
+OWNED_CONTENT_TABLES = frozenset({
+    "lessons",
+    "patterns",
+    "journal",
+    "agent_specs",
+    "specifications",
+    "mcp_servers",
+    "mcp_server_tools",
+    "annotations",
+})
+
+# Tables with `id` PK + source_agent where last-writer-wins.
+SHARED_METADATA_TABLES = frozenset({
+    "projects",
+    "project_state",
+    "approaches",
+    "key_files",
+    "guardrails",
+    "permissions",
+    "project_aliases",
+    "machines",
+    "databases",
+    "containers",
+    "conflicts",
+    "sessions",
+})
+
+
+def stamp() -> tuple[str, Optional[str]]:
+    """Return (source_agent, source_client_id) for the current request.
+
+    Defaults to ('claude', None) when unauth — preserves legacy behavior for
+    any code path not yet behind the resolver.
+    """
+    identity = get_identity()
+    if identity is None:
+        return ("claude", None)
+    return (identity.family, identity.client_id)
+
+
+async def assert_can_write(pool: asyncpg.Pool, table: str, row_id: int) -> None:
+    """Raise PermissionError if the current identity cannot write to `table.row_id`."""
+    if table in SHARED_METADATA_TABLES:
+        return
+    if table not in OWNED_CONTENT_TABLES:
+        raise ValueError(
+            f"assert_can_write called with unknown table '{table}'. "
+            "Add it to OWNED_CONTENT_TABLES or SHARED_METADATA_TABLES."
+        )
+
+    identity = get_identity()
+    current_family = identity.family if identity else "claude"
+    current_scopes = identity.scopes if identity else ["read", "write"]
+
+    if "admin" in current_scopes:
+        return
+
+    # All OWNED_CONTENT_TABLES have a SERIAL PK `id` column. Table name is
+    # allow-listed above, so f-string interpolation is safe.
+    row = await pool.fetchrow(
+        f"SELECT source_agent FROM {table} WHERE id = $1",
+        row_id,
+    )
+    if row is None:
+        return  # caller handles missing row
+    owner = row["source_agent"]
+    if owner != current_family:
+        raise PermissionError(
+            f"agent '{current_family}' cannot modify row owned by '{owner}' in {table}"
+        )
+
+
+def require_admin() -> None:
+    """Raise PermissionError if the current identity lacks 'admin' scope."""
+    identity = get_identity()
+    scopes = identity.scopes if identity else ["read", "write"]
+    if "admin" not in scopes:
+        family = identity.family if identity else "claude"
+        raise PermissionError(
+            f"agent '{family}' lacks 'admin' scope required for this operation"
+        )
