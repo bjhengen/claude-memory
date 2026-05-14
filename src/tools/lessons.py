@@ -7,6 +7,7 @@ from mcp.server.fastmcp import Context
 from src.server import mcp
 from src.db import get_embedding, format_embedding
 from src.helpers import resolve_project_id
+from src.identity import stamp
 
 
 @mcp.tool()
@@ -53,13 +54,16 @@ async def log_lesson(
     embedding_str = format_embedding(embedding)
 
     # Insert lesson
+    source_agent, source_client_id = stamp()
     row = await app.db.fetchrow(
         """
-        INSERT INTO lessons (title, content, project_id, tags, severity, embedding)
-        VALUES ($1, $2, $3, $4, $5, $6::vector)
+        INSERT INTO lessons (title, content, project_id, tags, severity, embedding,
+                             source_agent, source_client_id)
+        VALUES ($1, $2, $3, $4, $5, $6::vector, $7, $8)
         RETURNING id
         """,
-        title, content, project_id, tags or [], severity, embedding_str
+        title, content, project_id, tags or [], severity, embedding_str,
+        source_agent, source_client_id,
     )
     lesson_id = row["id"]
 
@@ -126,13 +130,16 @@ async def log_pattern(
     embedding = await get_embedding(app.openai, embedding_text)
     embedding_str = format_embedding(embedding)
 
+    source_agent, source_client_id = stamp()
     row = await app.db.fetchrow(
         """
-        INSERT INTO patterns (name, problem, solution, code_example, applies_to, embedding)
-        VALUES ($1, $2, $3, $4, $5, $6::vector)
+        INSERT INTO patterns (name, problem, solution, code_example, applies_to, embedding,
+                              source_agent, source_client_id)
+        VALUES ($1, $2, $3, $4, $5, $6::vector, $7, $8)
         RETURNING id
         """,
-        name, problem, solution, code_example, applies_to or [], embedding_str
+        name, problem, solution, code_example, applies_to or [], embedding_str,
+        source_agent, source_client_id,
     )
 
     return json.dumps({

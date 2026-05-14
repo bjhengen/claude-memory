@@ -7,6 +7,7 @@ from mcp.server.fastmcp import Context
 from src.server import mcp
 from src.db import get_embedding, format_embedding
 from src.helpers import resolve_project_id
+from src.identity import stamp
 
 
 @mcp.tool()
@@ -38,13 +39,16 @@ async def write_journal(
     embedding = await get_embedding(app.openai, content)
     embedding_str = format_embedding(embedding)
 
+    source_agent, source_client_id = stamp()
     row = await app.db.fetchrow(
         """
-        INSERT INTO journal (content, tags, mood, project_id, embedding)
-        VALUES ($1, $2, $3, $4, $5::vector)
+        INSERT INTO journal (content, tags, mood, project_id, embedding,
+                             source_agent, source_client_id)
+        VALUES ($1, $2, $3, $4, $5::vector, $6, $7)
         RETURNING id, entry_date
         """,
-        content, tags or [], mood, project_id, embedding_str
+        content, tags or [], mood, project_id, embedding_str,
+        source_agent, source_client_id,
     )
 
     return json.dumps({

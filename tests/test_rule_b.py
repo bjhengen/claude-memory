@@ -113,3 +113,110 @@ def test_require_admin_passes_when_admin():
         scopes=["read", "write", "admin"], source="apikey",
     ))
     require_admin()
+
+
+from unittest.mock import MagicMock
+import json as _json
+
+from src.server import AppContext
+
+
+def _ctx(db_pool, mock_openai=None, mock_anthropic=None):
+    ctx = MagicMock()
+    ctx.request_context.lifespan_context = AppContext(
+        db=db_pool,
+        openai=mock_openai or MagicMock(),
+        anthropic=mock_anthropic or MagicMock(),
+    )
+    return ctx
+
+
+def _codex():
+    set_identity(Identity(
+        family="codex", client_id="apikey:7",
+        scopes=["read", "write"], source="apikey",
+    ))
+
+
+@pytest.mark.asyncio
+async def test_log_lesson_stamps_codex(db_pool, mock_openai, mock_anthropic):
+    from src.tools.lessons import log_lesson
+    _codex()
+    await db_pool.execute("DELETE FROM lessons WHERE title = $1", "v6-stamp-lesson")
+    result = await log_lesson(
+        title="v6-stamp-lesson",
+        content="stamped by codex",
+        ctx=_ctx(db_pool, mock_openai, mock_anthropic),
+    )
+    payload = _json.loads(result)
+    lesson_id = payload["lesson_id"]
+    try:
+        row = await db_pool.fetchrow(
+            "SELECT source_agent, source_client_id FROM lessons WHERE id = $1",
+            lesson_id,
+        )
+        assert row["source_agent"] == "codex"
+        assert row["source_client_id"] == "apikey:7"
+    finally:
+        await db_pool.execute("DELETE FROM lessons WHERE id = $1", lesson_id)
+
+
+@pytest.mark.asyncio
+async def test_log_pattern_stamps_codex(db_pool, mock_openai):
+    from src.tools.lessons import log_pattern
+    _codex()
+    await db_pool.execute("DELETE FROM patterns WHERE name = $1", "v6-stamp-pattern")
+    result = await log_pattern(
+        name="v6-stamp-pattern",
+        problem="p", solution="s",
+        ctx=_ctx(db_pool, mock_openai),
+    )
+    payload = _json.loads(result)
+    pat_id = payload["pattern_id"]
+    try:
+        row = await db_pool.fetchrow(
+            "SELECT source_agent FROM patterns WHERE id = $1", pat_id,
+        )
+        assert row["source_agent"] == "codex"
+    finally:
+        await db_pool.execute("DELETE FROM patterns WHERE id = $1", pat_id)
+
+
+@pytest.mark.asyncio
+async def test_write_journal_stamps_codex(db_pool, mock_openai):
+    from src.tools.journal import write_journal
+    _codex()
+    result = await write_journal(
+        content="codex first journal", tags=["v6"],
+        ctx=_ctx(db_pool, mock_openai),
+    )
+    payload = _json.loads(result)
+    eid = payload["entry_id"]
+    try:
+        row = await db_pool.fetchrow(
+            "SELECT source_agent, source_client_id FROM journal WHERE id = $1", eid,
+        )
+        assert row["source_agent"] == "codex"
+        assert row["source_client_id"] == "apikey:7"
+    finally:
+        await db_pool.execute("DELETE FROM journal WHERE id = $1", eid)
+
+
+@pytest.mark.asyncio
+async def test_rate_lesson_cross_agent_allowed(db_pool):
+    """codex can rate a claude lesson (votes aren't ownership)."""
+    from src.tools.lessons import rate_lesson
+    row = await db_pool.fetchrow(
+        """INSERT INTO lessons (title, content, source_agent)
+           VALUES ('v6-rate-x-agent', 'c', 'claude') RETURNING id""",
+    )
+    lesson_id = row["id"]
+    _codex()
+    try:
+        result = await rate_lesson(
+            lesson_id=lesson_id, rating="up", ctx=_ctx(db_pool),
+        )
+        payload = _json.loads(result)
+        assert payload.get("success") is True
+    finally:
+        await db_pool.execute("DELETE FROM lessons WHERE id = $1", lesson_id)
