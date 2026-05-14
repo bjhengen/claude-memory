@@ -210,3 +210,54 @@ async def test_oauth_expired_token_does_not_resolve(db_pool):
     finally:
         await db_pool.execute("DELETE FROM oauth_access_tokens WHERE token = $1", token)
         await db_pool.execute("DELETE FROM oauth_clients WHERE client_id = $1", client_id)
+
+
+@pytest.mark.asyncio
+async def test_load_access_token_sets_identity_via_apikey(db_pool, monkeypatch):
+    """An api_keys-issued bearer is accepted by load_access_token AND sets identity."""
+    from src.auth import MemoryOAuthProvider
+
+    raw = "auth-wire-apikey-hhhh"
+    h = hashlib.sha256(raw.encode()).hexdigest()
+    row = await db_pool.fetchrow(
+        """INSERT INTO api_keys (api_key_hash, family, label, scopes)
+           VALUES ($1, 'codex', 'auth-wire-test', ARRAY['read','write']) RETURNING id""",
+        h,
+    )
+    key_id = row["id"]
+
+    provider = MemoryOAuthProvider(api_key="some-other-legacy")
+    provider.set_pool(db_pool)
+    monkeypatch.setattr("src.identity.LEGACY_API_KEY", "some-other-legacy")
+
+    try:
+        result = await provider.load_access_token(raw)
+        assert result is not None
+        assert result.client_id == f"apikey:{key_id}"
+
+        identity = get_identity()
+        assert identity is not None
+        assert identity.family == "codex"
+        assert identity.source == "apikey"
+    finally:
+        await db_pool.execute("DELETE FROM api_keys WHERE id = $1", key_id)
+
+
+@pytest.mark.asyncio
+async def test_load_access_token_legacy_back_compat(db_pool, monkeypatch):
+    """Legacy API_KEY bearer still produces a valid AccessToken AND sets identity."""
+    from src.auth import MemoryOAuthProvider
+
+    provider = MemoryOAuthProvider(api_key="legacy-wire-test-iiii")
+    provider.set_pool(db_pool)
+    monkeypatch.setattr("src.identity.LEGACY_API_KEY", "legacy-wire-test-iiii")
+
+    result = await provider.load_access_token("legacy-wire-test-iiii")
+    assert result is not None
+    # back-compat: legacy AccessToken client_id stays 'api-key-user'
+    assert result.client_id == "api-key-user"
+
+    identity = get_identity()
+    assert identity is not None
+    assert identity.family == "claude"
+    assert identity.source == "legacy"

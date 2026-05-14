@@ -248,8 +248,33 @@ class MemoryOAuthProvider:
     # ------------------------------------------------------------------
 
     async def load_access_token(self, token: str) -> AccessToken | None:
-        logger.info(f"load_access_token called, is_api_key={token == self.api_key}, token_prefix={token[:8]}...")
-        # Backward compatibility: accept the raw API key as a bearer token
+        """Load an access token AND populate the per-request identity ContextVar.
+
+        Resolves identity for stamping regardless of which auth path matched.
+        Failure to resolve identity is non-fatal — the access-token check
+        below is what gates the request.
+        """
+        from src.identity import resolve_identity, set_identity, get_identity
+
+        try:
+            identity = await resolve_identity(self.pool, token)
+            if identity is not None:
+                set_identity(identity)
+        except Exception as e:
+            logger.error(f"Identity resolution failed (non-fatal): {e}")
+
+        # api_keys-issued bearers are valid even though they aren't in
+        # oauth_access_tokens. The resolver has already validated them.
+        identity = get_identity()
+        if identity is not None and identity.source == "apikey":
+            return AccessToken(
+                token=token,
+                client_id=identity.client_id,
+                scopes=identity.scopes,
+                expires_at=None,
+            )
+
+        # Legacy API_KEY back-compat (preserves existing client_id="api-key-user")
         if token == self.api_key:
             return AccessToken(
                 token=token,
@@ -258,7 +283,7 @@ class MemoryOAuthProvider:
                 expires_at=None,
             )
 
-        # Check database for OAuth-issued access tokens
+        # OAuth-issued access tokens
         row = await self.pool.fetchrow(
             "SELECT client_id, scopes, expires_at, resource FROM oauth_access_tokens WHERE token = $1",
             token,
