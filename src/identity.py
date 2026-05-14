@@ -13,6 +13,7 @@ import contextvars
 import hashlib
 import logging
 import os
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -94,7 +95,49 @@ async def resolve_identity(pool: asyncpg.Pool, bearer: str) -> Optional[Identity
             source="apikey",
         )
 
-    # 2. (Future task) OAuth token lookup
+    # 2. OAuth access token lookup (with expiry filter)
+    row = await pool.fetchrow(
+        """SELECT t.client_id, c.client_name
+           FROM oauth_access_tokens t
+           JOIN oauth_clients c ON c.client_id = t.client_id
+           WHERE t.token = $1
+             AND (t.expires_at IS NULL OR t.expires_at > $2)""",
+        bearer, int(time.time()),
+    )
+    if row:
+        oauth_client_id = row["client_id"]
+        client_name = row["client_name"]
+
+        family_row = await pool.fetchrow(
+            "SELECT family FROM oauth_client_family WHERE client_id = $1",
+            oauth_client_id,
+        )
+        if family_row:
+            family = family_row["family"]
+        else:
+            family = classify_family_from_name(client_name)
+            await pool.execute(
+                """INSERT INTO oauth_client_family
+                   (client_id, family, client_name, inferred_from)
+                   VALUES ($1, $2, $3, 'client_name_prefix')
+                   ON CONFLICT (client_id) DO NOTHING""",
+                oauth_client_id, family, client_name,
+            )
+            if family == "unknown":
+                logger.warning(
+                    "Unknown OAuth client classified as 'unknown': "
+                    "client_id=%s client_name=%r. Update oauth_client_family.family "
+                    "to a known family if this is misclassified.",
+                    oauth_client_id, client_name,
+                )
+
+        return Identity(
+            family=family,
+            client_id=f"oauth:{oauth_client_id}",
+            scopes=["read", "write"],
+            source="oauth",
+        )
+
     # 3. Legacy API_KEY (back-compat)
     if LEGACY_API_KEY and bearer == LEGACY_API_KEY:
         logger.warning(

@@ -122,3 +122,91 @@ async def test_api_keys_wins_over_legacy(db_pool, monkeypatch):
         assert identity.family == "codex"
     finally:
         await db_pool.execute("DELETE FROM api_keys WHERE id = $1", row["id"])
+
+
+@pytest.mark.asyncio
+async def test_oauth_token_resolves_claude_family(db_pool):
+    client_id = "client_test_oauth_claude"
+    client_name = "claude-code-test"
+    token = "oauth-test-token-eeee"
+
+    await db_pool.execute(
+        """INSERT INTO oauth_clients (client_id, client_secret, client_name,
+                                       token_endpoint_auth_method, client_id_issued_at, raw_data)
+           VALUES ($1, 'secret', $2, 'none', extract(epoch from NOW())::bigint, '{}'::jsonb)""",
+        client_id, client_name,
+    )
+    await db_pool.execute(
+        """INSERT INTO oauth_access_tokens (token, client_id, scopes, expires_at)
+           VALUES ($1, $2, '[]'::jsonb, $3)""",
+        token, client_id, 2**31 - 1,
+    )
+    try:
+        identity = await resolve_identity(db_pool, token)
+        assert identity is not None
+        assert identity.family == "claude"
+        assert identity.client_id == f"oauth:{client_id}"
+        assert identity.source == "oauth"
+
+        family_row = await db_pool.fetchrow(
+            "SELECT family, inferred_from FROM oauth_client_family WHERE client_id = $1",
+            client_id,
+        )
+        assert family_row["family"] == "claude"
+        assert family_row["inferred_from"] == "client_name_prefix"
+    finally:
+        await db_pool.execute("DELETE FROM oauth_client_family WHERE client_id = $1", client_id)
+        await db_pool.execute("DELETE FROM oauth_access_tokens WHERE token = $1", token)
+        await db_pool.execute("DELETE FROM oauth_clients WHERE client_id = $1", client_id)
+
+
+@pytest.mark.asyncio
+async def test_oauth_token_unknown_client_name(db_pool):
+    client_id = "client_test_oauth_unknown"
+    client_name = "some-random-app"
+    token = "oauth-test-token-ffff"
+
+    await db_pool.execute(
+        """INSERT INTO oauth_clients (client_id, client_secret, client_name,
+                                       token_endpoint_auth_method, client_id_issued_at, raw_data)
+           VALUES ($1, 'secret', $2, 'none', extract(epoch from NOW())::bigint, '{}'::jsonb)""",
+        client_id, client_name,
+    )
+    await db_pool.execute(
+        """INSERT INTO oauth_access_tokens (token, client_id, scopes, expires_at)
+           VALUES ($1, $2, '[]'::jsonb, $3)""",
+        token, client_id, 2**31 - 1,
+    )
+    try:
+        identity = await resolve_identity(db_pool, token)
+        assert identity is not None
+        assert identity.family == "unknown"
+    finally:
+        await db_pool.execute("DELETE FROM oauth_client_family WHERE client_id = $1", client_id)
+        await db_pool.execute("DELETE FROM oauth_access_tokens WHERE token = $1", token)
+        await db_pool.execute("DELETE FROM oauth_clients WHERE client_id = $1", client_id)
+
+
+@pytest.mark.asyncio
+async def test_oauth_expired_token_does_not_resolve(db_pool):
+    """Expired access tokens must NOT set identity, even if the row still exists."""
+    client_id = "client_test_oauth_expired"
+    token = "oauth-test-token-gggg"
+
+    await db_pool.execute(
+        """INSERT INTO oauth_clients (client_id, client_secret, client_name,
+                                       token_endpoint_auth_method, client_id_issued_at, raw_data)
+           VALUES ($1, 'secret', 'claude-code', 'none', extract(epoch from NOW())::bigint, '{}'::jsonb)""",
+        client_id,
+    )
+    await db_pool.execute(
+        """INSERT INTO oauth_access_tokens (token, client_id, scopes, expires_at)
+           VALUES ($1, $2, '[]'::jsonb, $3)""",
+        token, client_id, 1,  # expired
+    )
+    try:
+        identity = await resolve_identity(db_pool, token)
+        assert identity is None
+    finally:
+        await db_pool.execute("DELETE FROM oauth_access_tokens WHERE token = $1", token)
+        await db_pool.execute("DELETE FROM oauth_clients WHERE client_id = $1", client_id)
