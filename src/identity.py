@@ -73,7 +73,27 @@ async def resolve_identity(pool: asyncpg.Pool, bearer: str) -> Optional[Identity
     a bearer that happens to match BOTH api_keys and legacy is attributed to
     api_keys for better forensics.)
     """
-    # 1. (Future task) api_keys lookup
+    # 1. api_keys hash lookup
+    bearer_hash = _sha256_hex(bearer)
+    row = await pool.fetchrow(
+        """SELECT id, family, scopes FROM api_keys
+           WHERE api_key_hash = $1 AND revoked_at IS NULL""",
+        bearer_hash,
+    )
+    if row:
+        # Touch last_seen_at. Awaited (one extra round-trip per request) for
+        # simplicity; revisit if it becomes a hot-path bottleneck.
+        await pool.execute(
+            "UPDATE api_keys SET last_seen_at = NOW() WHERE id = $1",
+            row["id"],
+        )
+        return Identity(
+            family=row["family"],
+            client_id=f"apikey:{row['id']}",
+            scopes=list(row["scopes"]),
+            source="apikey",
+        )
+
     # 2. (Future task) OAuth token lookup
     # 3. Legacy API_KEY (back-compat)
     if LEGACY_API_KEY and bearer == LEGACY_API_KEY:
