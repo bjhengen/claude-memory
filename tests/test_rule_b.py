@@ -220,3 +220,102 @@ async def test_rate_lesson_cross_agent_allowed(db_pool):
         assert payload.get("success") is True
     finally:
         await db_pool.execute("DELETE FROM lessons WHERE id = $1", lesson_id)
+
+
+@pytest.mark.asyncio
+async def test_create_spec_stamps_codex(db_pool, mock_openai):
+    from src.tools.specs import create_spec
+    proj = await db_pool.fetchrow(
+        "INSERT INTO projects (name) VALUES ('v6-spec-proj') RETURNING id",
+    )
+    _codex()
+    try:
+        result = await create_spec(
+            title="v6-stamp-spec",
+            content="C", summary="S",
+            project="v6-spec-proj",
+            ctx=_ctx(db_pool, mock_openai),
+        )
+        payload = _json.loads(result)
+        spec_id = payload["spec_id"]
+        try:
+            row = await db_pool.fetchrow(
+                "SELECT source_agent FROM specifications WHERE id = $1", spec_id,
+            )
+            assert row["source_agent"] == "codex"
+        finally:
+            await db_pool.execute("DELETE FROM specifications WHERE id = $1", spec_id)
+    finally:
+        await db_pool.execute("DELETE FROM projects WHERE id = $1", proj["id"])
+
+
+@pytest.mark.asyncio
+async def test_register_agent_stamps_codex(db_pool, mock_openai):
+    from src.tools.agents import register_agent
+    _codex()
+    result = await register_agent(
+        name="v6-stamp-agent",
+        description="D",
+        spec_content="C",
+        summary="S",
+        ctx=_ctx(db_pool, mock_openai),
+    )
+    payload = _json.loads(result)
+    aid = payload["agent_id"]
+    try:
+        row = await db_pool.fetchrow(
+            "SELECT source_agent FROM agent_specs WHERE id = $1", aid,
+        )
+        assert row["source_agent"] == "codex"
+    finally:
+        await db_pool.execute("DELETE FROM agent_specs WHERE id = $1", aid)
+
+
+@pytest.mark.asyncio
+async def test_register_mcp_server_stamps_codex(db_pool, mock_openai):
+    from src.tools.mcp_registry import register_mcp_server
+    _codex()
+    result = await register_mcp_server(
+        name="v6-stamp-mcp",
+        description="D",
+        transport="stdio",
+        ctx=_ctx(db_pool, mock_openai),
+    )
+    payload = _json.loads(result)
+    sid = payload["server_id"]
+    try:
+        row = await db_pool.fetchrow(
+            "SELECT source_agent FROM mcp_servers WHERE id = $1", sid,
+        )
+        assert row["source_agent"] == "codex"
+    finally:
+        await db_pool.execute("DELETE FROM mcp_servers WHERE id = $1", sid)
+
+
+@pytest.mark.asyncio
+async def test_annotate_stamps_codex(db_pool):
+    from src.tools.annotations import annotate
+    row = await db_pool.fetchrow(
+        """INSERT INTO lessons (title, content, source_agent)
+           VALUES ('v6-anno-target', 'c', 'claude') RETURNING id""",
+    )
+    lesson_id = row["id"]
+    _codex()
+    try:
+        result = await annotate(
+            entity_type="lesson",
+            entity_id=lesson_id,
+            note="codex says watch out",
+            ctx=_ctx(db_pool),
+        )
+        payload = _json.loads(result)
+        anno_id = payload["annotation_id"]
+        try:
+            arow = await db_pool.fetchrow(
+                "SELECT source_agent FROM annotations WHERE id = $1", anno_id,
+            )
+            assert arow["source_agent"] == "codex"
+        finally:
+            await db_pool.execute("DELETE FROM annotations WHERE id = $1", anno_id)
+    finally:
+        await db_pool.execute("DELETE FROM lessons WHERE id = $1", lesson_id)

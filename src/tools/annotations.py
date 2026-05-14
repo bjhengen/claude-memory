@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from mcp.server.fastmcp import Context
 
 from src.server import mcp
+from src.identity import stamp
 
 
 VALID_ENTITY_TYPES = {"lesson", "spec", "agent", "project", "mcp_server", "mcp_tool"}
@@ -45,6 +46,10 @@ async def annotate(
     if existing:
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         combined_note = f"{existing['note']}\n\n---\n[{timestamp}] {note}"
+        # v6 rule-b: first writer owns the row. We append to the note but
+        # deliberately do NOT update source_agent/source_client_id — the
+        # original annotator keeps ownership. Rule-b is enforced on
+        # clear_annotation per spec, not on note-appends.
         await app.db.execute(
             "UPDATE annotations SET note = $1, updated_at = NOW() WHERE id = $2",
             combined_note, existing["id"]
@@ -55,13 +60,15 @@ async def annotate(
             "message": f"Appended to existing annotation {existing['id']} on {entity_type} {entity_id}"
         })
 
+    source_agent, source_client_id = stamp()
     row = await app.db.fetchrow(
         """
-        INSERT INTO annotations (entity_type, entity_id, note)
-        VALUES ($1, $2, $3)
+        INSERT INTO annotations (entity_type, entity_id, note,
+                                 source_agent, source_client_id)
+        VALUES ($1, $2, $3, $4, $5)
         RETURNING id
         """,
-        entity_type, entity_id, note
+        entity_type, entity_id, note, source_agent, source_client_id
     )
 
     return json.dumps({

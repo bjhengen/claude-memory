@@ -6,6 +6,7 @@ from mcp.server.fastmcp import Context
 from src.server import mcp
 from src.db import get_embedding, format_embedding
 from src.helpers import resolve_project_id, fetch_annotations
+from src.identity import stamp
 
 
 @mcp.tool()
@@ -42,15 +43,18 @@ async def create_spec(
     embedding = await get_embedding(app.openai, summary)
     embedding_str = format_embedding(embedding)
 
+    source_agent, source_client_id = stamp()
     row = await app.db.fetchrow(
         """
         INSERT INTO specifications (title, content, summary, project_id, subsystem,
-                                    format_hints, triggers, embedding)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::vector)
+                                    format_hints, triggers, embedding,
+                                    source_agent, source_client_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::vector, $9, $10)
         RETURNING id
         """,
         title, content, summary, project_id, subsystem,
-        format_hints or [], triggers or [], embedding_str
+        format_hints or [], triggers or [], embedding_str,
+        source_agent, source_client_id
     )
 
     return json.dumps({

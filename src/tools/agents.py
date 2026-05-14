@@ -6,6 +6,7 @@ from mcp.server.fastmcp import Context
 from src.server import mcp
 from src.db import get_embedding, format_embedding
 from src.helpers import resolve_project_id, fetch_annotations
+from src.identity import stamp
 
 
 @mcp.tool()
@@ -58,15 +59,18 @@ async def register_agent(
     embedding = await get_embedding(app.openai, embedding_text)
     embedding_str = format_embedding(embedding)
 
+    source_agent, source_client_id = stamp()
     row = await app.db.fetchrow(
         """
         INSERT INTO agent_specs (name, description, spec_content, summary, model,
-                                 triggers, tools, project_id, embedding)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::vector)
+                                 triggers, tools, project_id, embedding,
+                                 source_agent, source_client_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::vector, $10, $11)
         RETURNING id
         """,
         name, description, spec_content, summary, model,
-        triggers or [], tools or [], project_id, embedding_str
+        triggers or [], tools or [], project_id, embedding_str,
+        source_agent, source_client_id
     )
 
     return json.dumps({

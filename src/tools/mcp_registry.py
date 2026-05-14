@@ -6,6 +6,7 @@ from mcp.server.fastmcp import Context
 from src.server import mcp
 from src.db import get_embedding, format_embedding
 from src.helpers import resolve_project_id
+from src.identity import stamp
 
 
 @mcp.tool()
@@ -66,15 +67,18 @@ async def register_mcp_server(
     # Convert config_snippet to JSON string for JSONB
     config_json = json.dumps(config_snippet) if config_snippet else None
 
+    source_agent, source_client_id = stamp()
     row = await app.db.fetchrow(
         """
         INSERT INTO mcp_servers (name, description, url, transport, machine_id,
-                                 auth_type, auth_hint, config_snippet, limitations, embedding)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10::vector)
+                                 auth_type, auth_hint, config_snippet, limitations, embedding,
+                                 source_agent, source_client_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10::vector, $11, $12)
         RETURNING id
         """,
         name, description, url, transport, machine_id,
-        auth_type, auth_hint, config_json, limitations, embedding_str
+        auth_type, auth_hint, config_json, limitations, embedding_str,
+        source_agent, source_client_id
     )
 
     server_id = row["id"]
@@ -431,17 +435,22 @@ async def register_mcp_tool(
 
     params_json = json.dumps(parameters) if parameters else None
 
+    source_agent, source_client_id = stamp()
+    # ON CONFLICT path: keep original source_agent (first writer owns the row,
+    # per v6 rule-b). Only description/params/embedding refresh on update.
     row = await app.db.fetchrow(
         """
-        INSERT INTO mcp_server_tools (server_id, tool_name, description, parameters, embedding)
-        VALUES ($1, $2, $3, $4::jsonb, $5::vector)
+        INSERT INTO mcp_server_tools (server_id, tool_name, description, parameters, embedding,
+                                      source_agent, source_client_id)
+        VALUES ($1, $2, $3, $4::jsonb, $5::vector, $6, $7)
         ON CONFLICT (server_id, tool_name) DO UPDATE SET
             description = EXCLUDED.description,
             parameters = EXCLUDED.parameters,
             embedding = EXCLUDED.embedding
         RETURNING id
         """,
-        server_row["id"], tool_name, description, params_json, embedding_str
+        server_row["id"], tool_name, description, params_json, embedding_str,
+        source_agent, source_client_id
     )
 
     return json.dumps({
