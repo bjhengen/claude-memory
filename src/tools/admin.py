@@ -6,6 +6,7 @@ from mcp.server.fastmcp import Context
 
 from src.server import mcp
 from src.helpers import resolve_project_id
+from src.identity import stamp
 
 
 @mcp.tool()
@@ -151,19 +152,24 @@ async def add_project(
         if machine_row:
             machine_id = machine_row["id"]
 
+    source_agent, source_client_id = stamp()
     row = await app.db.fetchrow(
         """
-        INSERT INTO projects (name, path, machine_id, tech_stack, status)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO projects (name, path, machine_id, tech_stack, status,
+                              source_agent, source_client_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         ON CONFLICT (name) DO UPDATE SET
             path = $2,
             machine_id = COALESCE($3, projects.machine_id),
             tech_stack = COALESCE($4, projects.tech_stack),
             status = $5,
+            source_agent = $6,
+            source_client_id = $7,
             updated_at = NOW()
         RETURNING id
         """,
-        name, path, machine_id, json.dumps(tech_stack or {}), status
+        name, path, machine_id, json.dumps(tech_stack or {}), status,
+        source_agent, source_client_id
     )
 
     return json.dumps({"success": True, "project_id": row["id"]})

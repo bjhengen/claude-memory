@@ -5,6 +5,7 @@ import json
 from mcp.server.fastmcp import Context
 
 from src.server import mcp
+from src.identity import stamp
 
 
 @mcp.tool()
@@ -106,18 +107,22 @@ async def add_machine(
     """
     app = ctx.request_context.lifespan_context
 
+    source_agent, source_client_id = stamp()
     row = await app.db.fetchrow(
         """
-        INSERT INTO machines (name, ip, ssh_command, notes)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO machines (name, ip, ssh_command, notes,
+                              source_agent, source_client_id)
+        VALUES ($1, $2, $3, $4, $5, $6)
         ON CONFLICT (name) DO UPDATE SET
             ip = COALESCE($2, machines.ip),
             ssh_command = COALESCE($3, machines.ssh_command),
             notes = COALESCE($4, machines.notes),
+            source_agent = $5,
+            source_client_id = $6,
             updated_at = NOW()
         RETURNING id
         """,
-        name, ip, ssh_command, notes
+        name, ip, ssh_command, notes, source_agent, source_client_id
     )
 
     return json.dumps({"success": True, "machine_id": row["id"]})
@@ -149,13 +154,16 @@ async def add_container(
     if not machine_row:
         return json.dumps({"error": f"Machine '{machine}' not found"})
 
+    source_agent, source_client_id = stamp()
     row = await app.db.fetchrow(
         """
-        INSERT INTO containers (name, machine_id, project, ports, compose_path)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO containers (name, machine_id, project, ports, compose_path,
+                                source_agent, source_client_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         RETURNING id
         """,
-        name, machine_row["id"], project, ports, compose_path
+        name, machine_row["id"], project, ports, compose_path,
+        source_agent, source_client_id
     )
 
     return json.dumps({"success": True, "container_id": row["id"]})

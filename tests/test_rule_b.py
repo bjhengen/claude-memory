@@ -319,3 +319,96 @@ async def test_annotate_stamps_codex(db_pool):
             await db_pool.execute("DELETE FROM annotations WHERE id = $1", anno_id)
     finally:
         await db_pool.execute("DELETE FROM lessons WHERE id = $1", lesson_id)
+
+
+@pytest.mark.asyncio
+async def test_start_session_stamps_codex(db_pool):
+    from src.tools.sessions import start_session
+    m = await db_pool.fetchrow(
+        "INSERT INTO machines (name) VALUES ('v6-sess-mac') RETURNING id",
+    )
+    _codex()
+    try:
+        result = await start_session(
+            machine="v6-sess-mac", ctx=_ctx(db_pool),
+        )
+        payload = _json.loads(result)
+        sid = payload["session_id"]
+        try:
+            row = await db_pool.fetchrow(
+                "SELECT source_agent FROM sessions WHERE id = $1", sid,
+            )
+            assert row["source_agent"] == "codex"
+        finally:
+            await db_pool.execute("DELETE FROM sessions WHERE id = $1", sid)
+    finally:
+        await db_pool.execute("DELETE FROM machines WHERE id = $1", m["id"])
+
+
+@pytest.mark.asyncio
+async def test_add_project_stamps_codex(db_pool):
+    from src.tools.admin import add_project
+    await db_pool.execute("DELETE FROM projects WHERE name = $1", "v6-add-proj")
+    _codex()
+    result = await add_project(
+        name="v6-add-proj",
+        path="/tmp",
+        ctx=_ctx(db_pool),
+    )
+    payload = _json.loads(result)
+    pid = payload["project_id"]
+    try:
+        row = await db_pool.fetchrow(
+            "SELECT source_agent FROM projects WHERE id = $1", pid,
+        )
+        assert row["source_agent"] == "codex"
+    finally:
+        await db_pool.execute("DELETE FROM projects WHERE id = $1", pid)
+
+
+@pytest.mark.asyncio
+async def test_add_machine_stamps_codex(db_pool):
+    from src.tools.infra import add_machine
+    await db_pool.execute("DELETE FROM machines WHERE name = $1", "v6-add-mac")
+    _codex()
+    result = await add_machine(
+        name="v6-add-mac",
+        ip="10.0.0.1",
+        ctx=_ctx(db_pool),
+    )
+    payload = _json.loads(result)
+    mid = payload["machine_id"]
+    try:
+        row = await db_pool.fetchrow(
+            "SELECT source_agent FROM machines WHERE id = $1", mid,
+        )
+        assert row["source_agent"] == "codex"
+    finally:
+        await db_pool.execute("DELETE FROM machines WHERE id = $1", mid)
+
+
+@pytest.mark.asyncio
+async def test_add_container_stamps_codex(db_pool):
+    from src.tools.infra import add_container
+    m = await db_pool.fetchrow(
+        "INSERT INTO machines (name) VALUES ('v6-cont-mac') RETURNING id",
+    )
+    _codex()
+    try:
+        result = await add_container(
+            name="v6-cont-name",
+            machine="v6-cont-mac",
+            project="v6-cont-proj",
+            ctx=_ctx(db_pool),
+        )
+        payload = _json.loads(result)
+        cid = payload["container_id"]
+        try:
+            row = await db_pool.fetchrow(
+                "SELECT source_agent FROM containers WHERE id = $1", cid,
+            )
+            assert row["source_agent"] == "codex"
+        finally:
+            await db_pool.execute("DELETE FROM containers WHERE id = $1", cid)
+    finally:
+        await db_pool.execute("DELETE FROM machines WHERE id = $1", m["id"])

@@ -7,6 +7,7 @@ from mcp.server.fastmcp import Context
 from src.server import mcp
 from src.db import get_embedding, format_embedding
 from src.helpers import resolve_project_id
+from src.identity import stamp
 
 
 @mcp.tool()
@@ -33,13 +34,14 @@ async def start_session(
     if project:
         project_id = await resolve_project_id(app.db, project)
 
+    source_agent, source_client_id = stamp()
     row = await app.db.fetchrow(
         """
-        INSERT INTO sessions (machine_id, project_id)
-        VALUES ($1, $2)
+        INSERT INTO sessions (machine_id, project_id, source_agent, source_client_id)
+        VALUES ($1, $2, $3, $4)
         RETURNING id, started_at
         """,
-        machine_id, project_id
+        machine_id, project_id, source_agent, source_client_id
     )
 
     return json.dumps({
