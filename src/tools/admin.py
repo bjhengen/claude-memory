@@ -307,3 +307,50 @@ async def merge_projects(
         "moved": moved,
         "alias_created": merge_row["name"]
     })
+
+
+@mcp.tool()
+async def list_clients(ctx: Context = None) -> str:
+    """List all known MCP clients (api_keys + OAuth) with family and status.
+
+    Admin scope required.
+    """
+    from src.identity import require_admin
+    require_admin()
+    app = ctx.request_context.lifespan_context
+
+    api_key_rows = await app.db.fetch(
+        """SELECT id, family, client_name, label, scopes,
+                  created_at, last_seen_at, revoked_at
+           FROM api_keys ORDER BY id"""
+    )
+    oauth_rows = await app.db.fetch(
+        """SELECT c.client_id, c.client_name, c.client_id_issued_at, f.family
+           FROM oauth_clients c
+           LEFT JOIN oauth_client_family f ON f.client_id = c.client_id
+           ORDER BY c.client_id_issued_at"""
+    )
+
+    out = []
+    for r in api_key_rows:
+        out.append({
+            "source": "api_key",
+            "id": r["id"],
+            "family": r["family"],
+            "client_name": r["client_name"],
+            "label": r["label"],
+            "scopes": list(r["scopes"]),
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            "last_seen_at": r["last_seen_at"].isoformat() if r["last_seen_at"] else None,
+            "revoked_at": r["revoked_at"].isoformat() if r["revoked_at"] else None,
+        })
+    for r in oauth_rows:
+        out.append({
+            "source": "oauth",
+            "client_id": r["client_id"],
+            "client_name": r["client_name"],
+            "family": r["family"] or "unknown",
+            "issued_at": r["client_id_issued_at"],
+        })
+
+    return json.dumps({"clients": out})

@@ -691,3 +691,53 @@ async def test_end_session_stamps_project_state(db_pool, mock_openai):
         await db_pool.execute("DELETE FROM sessions WHERE project_id = $1", p["id"])
         await db_pool.execute("DELETE FROM projects WHERE id = $1", p["id"])
         await db_pool.execute("DELETE FROM machines WHERE id = $1", m["id"])
+
+
+@pytest.mark.asyncio
+async def test_list_clients_requires_admin(db_pool):
+    from src.tools.admin import list_clients
+    set_identity(Identity(
+        family="claude", client_id="apikey:7",
+        scopes=["read", "write"], source="apikey",
+    ))
+    with pytest.raises(PermissionError):
+        await list_clients(ctx=_ctx(db_pool))
+
+
+@pytest.mark.asyncio
+async def test_list_clients_returns_api_keys_and_oauth(db_pool):
+    from src.tools.admin import list_clients
+    import hashlib
+
+    raw = "list-clients-bearer"
+    h = hashlib.sha256(raw.encode()).hexdigest()
+    key = await db_pool.fetchrow(
+        """INSERT INTO api_keys (api_key_hash, family, label)
+           VALUES ($1, 'codex', 'list-test') RETURNING id""",
+        h,
+    )
+    await db_pool.execute(
+        """INSERT INTO oauth_clients (client_id, client_secret, client_name,
+                                       token_endpoint_auth_method, client_id_issued_at, raw_data)
+           VALUES ('client_list_test', 'sec', 'claude-code-test', 'none',
+                   extract(epoch from NOW())::bigint, '{}'::jsonb)
+           ON CONFLICT (client_id) DO NOTHING""",
+    )
+
+    set_identity(Identity(
+        family="claude", client_id="apikey:99",
+        scopes=["read", "write", "admin"], source="apikey",
+    ))
+    try:
+        result = await list_clients(ctx=_ctx(db_pool))
+        payload = _json.loads(result)
+        sources = {r["source"] for r in payload["clients"]}
+        assert "api_key" in sources
+        assert "oauth" in sources
+        assert any(
+            r["source"] == "api_key" and r["label"] == "list-test"
+            for r in payload["clients"]
+        )
+    finally:
+        await db_pool.execute("DELETE FROM api_keys WHERE id = $1", key["id"])
+        await db_pool.execute("DELETE FROM oauth_clients WHERE client_id = 'client_list_test'")
