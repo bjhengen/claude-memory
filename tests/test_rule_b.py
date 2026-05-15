@@ -505,6 +505,42 @@ async def test_codex_cannot_clear_claude_annotation(db_pool):
 
 
 @pytest.mark.asyncio
+async def test_merge_projects_requires_admin(db_pool):
+    from src.tools.admin import merge_projects
+    a = await db_pool.fetchrow(
+        "INSERT INTO projects (name) VALUES ('v6-merge-A') RETURNING id",
+    )
+    b = await db_pool.fetchrow(
+        "INSERT INTO projects (name) VALUES ('v6-merge-B') RETURNING id",
+    )
+    set_identity(Identity(
+        family="claude", client_id="apikey:7",
+        scopes=["read", "write"], source="apikey",
+    ))
+    try:
+        with pytest.raises(PermissionError) as exc:
+            await merge_projects(
+                keep="v6-merge-A", merge="v6-merge-B", ctx=_ctx(db_pool),
+            )
+        assert "admin" in str(exc.value).lower()
+    finally:
+        await db_pool.execute("DELETE FROM projects WHERE id IN ($1, $2)", a["id"], b["id"])
+
+
+@pytest.mark.asyncio
+async def test_resolve_conflict_requires_admin(db_pool):
+    from src.tools.consolidation import resolve_conflict
+    set_identity(Identity(
+        family="claude", client_id="apikey:7",
+        scopes=["read", "write"], source="apikey",
+    ))
+    with pytest.raises(PermissionError):
+        await resolve_conflict(
+            conflict_id=99999, resolution="kept_both", ctx=_ctx(db_pool),
+        )
+
+
+@pytest.mark.asyncio
 async def test_end_session_stamps_project_state(db_pool, mock_openai):
     from src.tools.sessions import start_session, end_session
     m = await db_pool.fetchrow(

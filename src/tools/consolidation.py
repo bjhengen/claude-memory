@@ -318,6 +318,8 @@ async def resolve_conflict(
         note: Optional explanation
         reviewer: Who resolved
     """
+    from src.identity import require_admin
+    require_admin()
     if resolution not in ("kept_a", "kept_b", "kept_both", "irrelevant"):
         return json.dumps({"error": f"invalid resolution '{resolution}'"})
 

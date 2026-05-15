@@ -232,6 +232,8 @@ async def merge_projects(
         keep: Project name to keep (canonical)
         merge: Project name to merge into keep (will be deleted)
     """
+    from src.identity import require_admin
+    require_admin()
     app = ctx.request_context.lifespan_context
 
     keep_row = await app.db.fetchrow(
