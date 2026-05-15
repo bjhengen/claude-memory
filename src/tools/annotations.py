@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from mcp.server.fastmcp import Context
 
 from src.server import mcp
-from src.identity import stamp
+from src.identity import stamp, assert_can_write
 
 
 VALID_ENTITY_TYPES = {"lesson", "spec", "agent", "project", "mcp_server", "mcp_tool"}
@@ -124,20 +124,40 @@ async def get_annotations(
 
 @mcp.tool()
 async def clear_annotation(
-    annotation_id: int,
+    entity_type: str,
+    entity_id: int,
     ctx: Context = None
 ) -> str:
     """
-    Delete an annotation by its ID.
+    Delete the annotation attached to an entity.
 
     Args:
-        annotation_id: ID of the annotation to delete
+        entity_type: Type of entity (lesson, spec, agent, project, mcp_server, mcp_tool)
+        entity_id: ID of the entity whose annotation should be cleared
     """
     app = ctx.request_context.lifespan_context
 
+    if entity_type not in VALID_ENTITY_TYPES:
+        return json.dumps({
+            "error": f"Invalid entity_type '{entity_type}'. Must be one of: {', '.join(sorted(VALID_ENTITY_TYPES))}"
+        })
+
+    existing = await app.db.fetchrow(
+        "SELECT id FROM annotations WHERE entity_type = $1 AND entity_id = $2",
+        entity_type, entity_id,
+    )
+    if not existing:
+        return json.dumps({
+            "success": False,
+            "message": f"No annotation found for {entity_type} {entity_id}"
+        })
+
+    annotation_id = existing["id"]
+    await assert_can_write(app.db, "annotations", annotation_id)
+
     result = await app.db.execute(
         "DELETE FROM annotations WHERE id = $1",
-        annotation_id
+        annotation_id,
     )
 
     if result == "DELETE 1":

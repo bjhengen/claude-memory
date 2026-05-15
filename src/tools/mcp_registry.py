@@ -6,7 +6,7 @@ from mcp.server.fastmcp import Context
 from src.server import mcp
 from src.db import get_embedding, format_embedding
 from src.helpers import resolve_project_id
-from src.identity import stamp
+from src.identity import stamp, assert_can_write
 
 
 @mcp.tool()
@@ -214,6 +214,9 @@ async def update_mcp_server(
     if not existing:
         return json.dumps({"error": f"MCP server {server_id} not found"})
 
+    await assert_can_write(app.db, "mcp_servers", server_id)
+    acting_agent, _ = stamp()
+
     updates = ["updated_at = NOW()"]
     params = []
     param_idx = 1
@@ -278,6 +281,10 @@ async def update_mcp_server(
         params.append(embedding_str)
         param_idx += 1
 
+    updates.append(f"updated_by_agent = ${param_idx}")
+    params.append(acting_agent)
+    param_idx += 1
+
     params.append(server_id)
     await app.db.execute(
         f"UPDATE mcp_servers SET {', '.join(updates)} WHERE id = ${param_idx}",
@@ -311,9 +318,15 @@ async def retire_mcp_server(
     if not existing:
         return json.dumps({"error": f"MCP server {server_id} not found"})
 
+    await assert_can_write(app.db, "mcp_servers", server_id)
+    acting_agent, _ = stamp()
+
     await app.db.execute(
-        "UPDATE mcp_servers SET retired_at = NOW(), retired_reason = $1 WHERE id = $2",
-        reason, server_id
+        """UPDATE mcp_servers SET retired_at = NOW(),
+                                  retired_reason = $1,
+                                  retired_by_agent = $2
+           WHERE id = $3""",
+        reason, acting_agent, server_id,
     )
 
     return json.dumps({

@@ -6,7 +6,7 @@ from mcp.server.fastmcp import Context
 from src.server import mcp
 from src.db import get_embedding, format_embedding
 from src.helpers import resolve_project_id, fetch_annotations
-from src.identity import stamp
+from src.identity import stamp, assert_can_write
 
 
 @mcp.tool()
@@ -153,6 +153,9 @@ async def update_agent(
     if not existing:
         return json.dumps({"error": f"Agent {agent_id} not found"})
 
+    await assert_can_write(app.db, "agent_specs", agent_id)
+    acting_agent, _ = stamp()
+
     updates = ["version = version + 1", "updated_at = NOW()"]
     params = []
     param_idx = 1
@@ -200,6 +203,10 @@ async def update_agent(
         updates.append(f"embedding = ${param_idx}::vector")
         params.append(embedding_str)
         param_idx += 1
+
+    updates.append(f"updated_by_agent = ${param_idx}")
+    params.append(acting_agent)
+    param_idx += 1
 
     params.append(agent_id)
     await app.db.execute(
@@ -298,9 +305,15 @@ async def retire_agent(
     if not existing:
         return json.dumps({"error": f"Agent {agent_id} not found"})
 
+    await assert_can_write(app.db, "agent_specs", agent_id)
+    acting_agent, _ = stamp()
+
     await app.db.execute(
-        "UPDATE agent_specs SET retired_at = NOW(), retired_reason = $1 WHERE id = $2",
-        reason, agent_id
+        """UPDATE agent_specs SET retired_at = NOW(),
+                                  retired_reason = $1,
+                                  retired_by_agent = $2
+           WHERE id = $3""",
+        reason, acting_agent, agent_id,
     )
 
     return json.dumps({

@@ -438,6 +438,73 @@ async def test_update_project_state_stamps_writer(db_pool):
 
 
 @pytest.mark.asyncio
+async def test_codex_cannot_retire_claude_lesson(db_pool):
+    from src.tools.lessons import retire_lesson
+    row = await db_pool.fetchrow(
+        """INSERT INTO lessons (title, content, source_agent)
+           VALUES ('v6-retire-foreign', 'c', 'claude') RETURNING id""",
+    )
+    lesson_id = row["id"]
+    _codex()
+    try:
+        with pytest.raises(PermissionError) as exc:
+            await retire_lesson(
+                lesson_id=lesson_id, reason="codex says no", ctx=_ctx(db_pool),
+            )
+        assert "codex" in str(exc.value)
+        assert "claude" in str(exc.value)
+    finally:
+        await db_pool.execute("DELETE FROM lessons WHERE id = $1", lesson_id)
+
+
+@pytest.mark.asyncio
+async def test_codex_can_retire_own_lesson(db_pool):
+    from src.tools.lessons import retire_lesson
+    row = await db_pool.fetchrow(
+        """INSERT INTO lessons (title, content, source_agent)
+           VALUES ('v6-retire-own', 'c', 'codex') RETURNING id""",
+    )
+    lesson_id = row["id"]
+    _codex()
+    try:
+        result = await retire_lesson(
+            lesson_id=lesson_id, reason="cleanup", ctx=_ctx(db_pool),
+        )
+        payload = _json.loads(result)
+        assert payload.get("success") is True
+        row = await db_pool.fetchrow(
+            "SELECT retired_at, retired_by_agent FROM lessons WHERE id = $1", lesson_id,
+        )
+        assert row["retired_at"] is not None
+        assert row["retired_by_agent"] == "codex"
+    finally:
+        await db_pool.execute("DELETE FROM lessons WHERE id = $1", lesson_id)
+
+
+@pytest.mark.asyncio
+async def test_codex_cannot_clear_claude_annotation(db_pool):
+    from src.tools.annotations import clear_annotation
+    L = await db_pool.fetchrow(
+        """INSERT INTO lessons (title, content, source_agent)
+           VALUES ('v6-clear-anno-target', 'c', 'claude') RETURNING id""",
+    )
+    A = await db_pool.fetchrow(
+        """INSERT INTO annotations (entity_type, entity_id, note, source_agent)
+           VALUES ('lesson', $1, 'claude wrote this', 'claude') RETURNING id""",
+        L["id"],
+    )
+    _codex()
+    try:
+        with pytest.raises(PermissionError):
+            await clear_annotation(
+                entity_type="lesson", entity_id=L["id"], ctx=_ctx(db_pool),
+            )
+    finally:
+        await db_pool.execute("DELETE FROM annotations WHERE id = $1", A["id"])
+        await db_pool.execute("DELETE FROM lessons WHERE id = $1", L["id"])
+
+
+@pytest.mark.asyncio
 async def test_end_session_stamps_project_state(db_pool, mock_openai):
     from src.tools.sessions import start_session, end_session
     m = await db_pool.fetchrow(
