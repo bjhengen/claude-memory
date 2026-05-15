@@ -71,3 +71,34 @@ async def test_find_candidates_missing_source_agent_is_typeerror():
             pool=None, query_embedding=[], new_lesson_id=0,
             project_id=None, cosine_threshold=0.85, top_k=1,
         )
+
+
+@pytest.mark.asyncio
+async def test_generate_pairs_returns_source_agents(db_pool):
+    """generate_pairs includes a_source_agent, b_source_agent in each pair."""
+    from src.consolidation.backlog import generate_pairs
+
+    emb = "[" + ",".join(["0.1"] * 1536) + "]"
+    claude = await db_pool.fetchrow(
+        """INSERT INTO lessons (title, content, embedding, source_agent)
+           VALUES ('v6-gp-claude', 'shared', $1::vector, 'claude') RETURNING id""",
+        emb,
+    )
+    codex = await db_pool.fetchrow(
+        """INSERT INTO lessons (title, content, embedding, source_agent)
+           VALUES ('v6-gp-codex', 'shared', $1::vector, 'codex') RETURNING id""",
+        emb,
+    )
+    try:
+        pairs = await generate_pairs(pool=db_pool, cosine_threshold=0.85)
+        pair = next(
+            (p for p in pairs
+             if {p["lesson_a_id"], p["lesson_b_id"]} == {claude["id"], codex["id"]}),
+            None,
+        )
+        assert pair is not None
+        assert {pair["a_source_agent"], pair["b_source_agent"]} == {"claude", "codex"}
+    finally:
+        await db_pool.execute(
+            "DELETE FROM lessons WHERE id IN ($1, $2)", claude["id"], codex["id"],
+        )

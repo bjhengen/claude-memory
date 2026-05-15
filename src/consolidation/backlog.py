@@ -30,7 +30,9 @@ async def generate_pairs(
         SELECT a.id AS lesson_a_id, b.id AS lesson_b_id,
                (1 - (a.embedding <=> b.embedding)) AS cosine,
                a.title AS a_title, a.content AS a_content,
-               b.title AS b_title, b.content AS b_content
+               b.title AS b_title, b.content AS b_content,
+               a.source_agent AS a_source_agent,
+               b.source_agent AS b_source_agent
         FROM lessons a
         JOIN lessons b ON a.id < b.id
         WHERE a.embedding IS NOT NULL AND b.embedding IS NOT NULL
@@ -69,13 +71,15 @@ async def judge_and_record(
             """
             INSERT INTO backlog_analysis
               (batch_run_id, lesson_a_id, lesson_b_id, cosine_similarity,
-               judge_model, verdict, direction, confidence, reasoning)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+               judge_model, verdict, direction, confidence, reasoning,
+               left_source_agent, right_source_agent)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
             ON CONFLICT (batch_run_id, lesson_a_id, lesson_b_id) DO NOTHING
             """,
             batch_run_id, pair["lesson_a_id"], pair["lesson_b_id"],
             float(pair["cosine"]), judge_model, verdict.relationship,
             verdict.direction, verdict.confidence, verdict.reasoning,
+            pair.get("a_source_agent"), pair.get("b_source_agent"),
         )
     except Exception as e:
         logger.warning(
