@@ -46,6 +46,7 @@ async def consolidate_at_log(
     new_content: str,
     new_embedding: list[float],
     project_id: int | None,
+    new_source_agent: str,
 ) -> dict:
     """
     Run consolidation for a just-inserted lesson. Returns a summary dict:
@@ -71,6 +72,7 @@ async def consolidate_at_log(
             pool, query_embedding=new_embedding, new_lesson_id=new_lesson_id,
             project_id=project_id, cosine_threshold=config.CANDIDATE_COSINE,
             top_k=config.CANDIDATE_TOP_K,
+            source_agent=new_source_agent,
         )
     except Exception as e:
         logger.warning("candidate_finder failed: %s", e)

@@ -45,7 +45,8 @@ async def test_find_candidates_returns_top_k_above_cosine_threshold(db_pool):
 
     results = await find_candidates(db_pool, query_embedding=emb_a,
                                     new_lesson_id=id_a, project_id=None,
-                                    cosine_threshold=0.9, top_k=5)
+                                    cosine_threshold=0.9, top_k=5,
+                                    source_agent="claude")
 
     returned_ids = [r["id"] for r in results]
     assert id_b in returned_ids
@@ -68,7 +69,8 @@ async def test_find_candidates_excludes_retired_lessons(db_pool):
 
     results = await find_candidates(db_pool, query_embedding=emb,
                                     new_lesson_id=-1, project_id=None,
-                                    cosine_threshold=0.5, top_k=5)
+                                    cosine_threshold=0.5, top_k=5,
+                                    source_agent="claude")
 
     titles = [r["title"] for r in results]
     assert "T_CAND_RET_OLD" not in titles
@@ -100,7 +102,8 @@ async def test_find_candidates_scopes_to_project_or_null(db_pool):
 
     results = await find_candidates(db_pool, query_embedding=emb,
                                     new_lesson_id=-1, project_id=proj_a["id"],
-                                    cosine_threshold=0.5, top_k=5)
+                                    cosine_threshold=0.5, top_k=5,
+                                    source_agent="claude")
 
     titles = {r["title"] for r in results}
     assert "T_CAND_PROJ_SAME" in titles

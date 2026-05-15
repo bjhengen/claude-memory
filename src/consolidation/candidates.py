@@ -12,16 +12,14 @@ async def find_candidates(
     project_id: int | None,
     cosine_threshold: float,
     top_k: int,
+    source_agent: str,           # REQUIRED — cross-agent skip
 ) -> list[dict[str, Any]]:
-    """
-    Return up to `top_k` lessons with cosine similarity >= threshold.
+    """Return up to `top_k` lessons with cosine >= threshold AND same source_agent.
 
-    - Excludes the new lesson itself (by id)
-    - Excludes retired lessons
-    - Scopes to same project_id OR NULL project on either side
+    Required `source_agent`: callers must explicitly specify the agent family
+    of the new lesson. Filtering same-agent prevents cross-agent auto-merge.
     """
     emb_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
-
     rows = await pool.fetch(
         """
         SELECT id, title, content, project_id, tags, severity,
@@ -33,10 +31,10 @@ async def find_candidates(
           AND id <> $2
           AND ($3::int IS NULL OR project_id = $3 OR project_id IS NULL)
           AND (1 - (embedding <=> $1::vector)) >= $4
+          AND source_agent = $5
         ORDER BY embedding <=> $1::vector
-        LIMIT $5
+        LIMIT $6
         """,
-        emb_str, new_lesson_id, project_id, cosine_threshold, top_k
+        emb_str, new_lesson_id, project_id, cosine_threshold, source_agent, top_k,
     )
-
     return [dict(r) for r in rows]

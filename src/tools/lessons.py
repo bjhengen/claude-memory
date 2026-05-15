@@ -79,6 +79,7 @@ async def log_lesson(
             new_content=content,
             new_embedding=embedding,
             project_id=project_id,
+            new_source_agent=source_agent,
         )
     except Exception as e:
         import logging
