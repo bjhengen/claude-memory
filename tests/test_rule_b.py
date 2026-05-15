@@ -412,3 +412,57 @@ async def test_add_container_stamps_codex(db_pool):
             await db_pool.execute("DELETE FROM containers WHERE id = $1", cid)
     finally:
         await db_pool.execute("DELETE FROM machines WHERE id = $1", m["id"])
+
+
+@pytest.mark.asyncio
+async def test_update_project_state_stamps_writer(db_pool):
+    from src.tools.admin import update_project_state
+    proj = await db_pool.fetchrow(
+        "INSERT INTO projects (name, source_agent) VALUES ('v6-pstate', 'claude') RETURNING id",
+    )
+    _codex()
+    try:
+        result = await update_project_state(
+            project="v6-pstate",
+            current_focus="codex took over",
+            ctx=_ctx(db_pool),
+        )
+        assert "error" not in _json.loads(result)
+        row = await db_pool.fetchrow(
+            "SELECT source_agent FROM project_state WHERE project_id = $1", proj["id"],
+        )
+        assert row["source_agent"] == "codex"
+    finally:
+        await db_pool.execute("DELETE FROM project_state WHERE project_id = $1", proj["id"])
+        await db_pool.execute("DELETE FROM projects WHERE id = $1", proj["id"])
+
+
+@pytest.mark.asyncio
+async def test_end_session_stamps_project_state(db_pool, mock_openai):
+    from src.tools.sessions import start_session, end_session
+    m = await db_pool.fetchrow(
+        "INSERT INTO machines (name) VALUES ('v6-end-mac') RETURNING id",
+    )
+    p = await db_pool.fetchrow(
+        "INSERT INTO projects (name) VALUES ('v6-end-proj') RETURNING id",
+    )
+    _codex()
+    try:
+        s = _json.loads(await start_session(
+            machine="v6-end-mac", project="v6-end-proj",
+            ctx=_ctx(db_pool, mock_openai),
+        ))
+        sid = s["session_id"]
+        await end_session(
+            session_id=sid, summary="codex did stuff",
+            ctx=_ctx(db_pool, mock_openai),
+        )
+        row = await db_pool.fetchrow(
+            "SELECT source_agent FROM project_state WHERE project_id = $1", p["id"],
+        )
+        assert row["source_agent"] == "codex"
+    finally:
+        await db_pool.execute("DELETE FROM project_state WHERE project_id = $1", p["id"])
+        await db_pool.execute("DELETE FROM sessions WHERE project_id = $1", p["id"])
+        await db_pool.execute("DELETE FROM projects WHERE id = $1", p["id"])
+        await db_pool.execute("DELETE FROM machines WHERE id = $1", m["id"])

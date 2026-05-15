@@ -58,16 +58,28 @@ async def update_project_state(
 
     updates.append("updated_at = NOW()")
 
+    # Always stamp on every UPDATE (Pattern 3, last-writer-wins)
+    source_agent, source_client_id = stamp()
+    updates.append(f"source_agent = ${param_idx}")
+    params.append(source_agent)
+    param_idx += 1
+    updates.append(f"source_client_id = ${param_idx}")
+    params.append(source_client_id)
+    param_idx += 1
+
     await app.db.execute(
         f"""
-        INSERT INTO project_state (project_id, current_focus, blockers, next_steps)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO project_state (project_id, current_focus, blockers, next_steps,
+                                   source_agent, source_client_id)
+        VALUES ($1, $2, $3, $4, $5, $6)
         ON CONFLICT (project_id) DO UPDATE SET {', '.join(updates)}
         """,
         project_id,
         current_focus or "",
         blockers or [],
-        next_steps or []
+        next_steps or [],
+        source_agent,
+        source_client_id,
     )
 
     return json.dumps({"success": True, "message": f"State updated for {project}"})
@@ -274,13 +286,14 @@ async def merge_projects(
     await app.db.execute("DELETE FROM project_state WHERE project_id = $1", merge_id)
 
     # Create alias for old name
+    source_agent, source_client_id = stamp()
     await app.db.execute(
         """
-        INSERT INTO project_aliases (alias, project_id)
-        VALUES ($1, $2)
+        INSERT INTO project_aliases (alias, project_id, source_agent, source_client_id)
+        VALUES ($1, $2, $3, $4)
         ON CONFLICT (alias) DO NOTHING
         """,
-        merge_row["name"], keep_id
+        merge_row["name"], keep_id, source_agent, source_client_id
     )
 
     # Delete merge project

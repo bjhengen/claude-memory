@@ -104,22 +104,28 @@ async def end_session(
         in_progress = [i["description"] for i in (items or []) if i.get("type") == "in_progress"]
         blocked = [i["description"] for i in (items or []) if i.get("type") == "blocked"]
 
+        source_agent, source_client_id = stamp()
         await app.db.execute(
             """
-            INSERT INTO project_state (project_id, last_session_id, current_focus, blockers, next_steps)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO project_state (project_id, last_session_id, current_focus, blockers, next_steps,
+                                       source_agent, source_client_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             ON CONFLICT (project_id) DO UPDATE SET
                 last_session_id = $2,
                 current_focus = $3,
                 blockers = $4,
                 next_steps = $5,
-                updated_at = NOW()
+                updated_at = NOW(),
+                source_agent = $6,
+                source_client_id = $7
             """,
             session["project_id"],
             session_id,
             summary[:200],
             blocked,
-            in_progress
+            in_progress,
+            source_agent,
+            source_client_id,
         )
 
     return json.dumps({

@@ -6,6 +6,7 @@ import re
 from mcp.server.fastmcp import Context
 
 from src.helpers import resolve_project_id
+from src.identity import stamp
 from src.server import mcp
 
 
@@ -180,9 +181,13 @@ async def set_project_claude_md(project: str, content: str, ctx: Context = None)
     if not project_id:
         return json.dumps({"error": f"Project '{project}' not found"})
 
+    source_agent, source_client_id = stamp()
     await app.db.execute(
-        "UPDATE projects SET claude_md = $1, updated_at = NOW() WHERE id = $2",
-        content, project_id
+        """UPDATE projects
+           SET claude_md = $1, updated_at = NOW(),
+               source_agent = $2, source_client_id = $3
+           WHERE id = $4""",
+        content, source_agent, source_client_id, project_id
     )
 
     return json.dumps({"success": True, "message": f"CLAUDE.md set for {project}"})
@@ -233,9 +238,13 @@ async def update_project_claude_md(
         updated = existing.rstrip() + '\n\n' + content.rstrip() + '\n'
         action = "appended"
 
+    source_agent, source_client_id = stamp()
     await app.db.execute(
-        "UPDATE projects SET claude_md = $1, updated_at = NOW() WHERE id = $2",
-        updated, project_id
+        """UPDATE projects
+           SET claude_md = $1, updated_at = NOW(),
+               source_agent = $2, source_client_id = $3
+           WHERE id = $4""",
+        updated, source_agent, source_client_id, project_id
     )
 
     return json.dumps({"success": True, "message": f"Section '{section}' {action} in CLAUDE.md for {project}"})
