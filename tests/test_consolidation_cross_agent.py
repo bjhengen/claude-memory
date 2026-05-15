@@ -102,3 +102,61 @@ async def test_generate_pairs_returns_source_agents(db_pool):
         await db_pool.execute(
             "DELETE FROM lessons WHERE id IN ($1, $2)", claude["id"], codex["id"],
         )
+
+
+@pytest.mark.asyncio
+async def test_fetch_candidate_rows_excludes_cross_agent(db_pool):
+    """fetch_candidate_rows does not return rows where left/right source_agents differ."""
+    from src.tools.backlog_apply import fetch_candidate_rows
+
+    L1 = await db_pool.fetchrow(
+        """INSERT INTO lessons (title, content, source_agent)
+           VALUES ('v6-bx-l1', 'c', 'claude') RETURNING id""",
+    )
+    L2 = await db_pool.fetchrow(
+        """INSERT INTO lessons (title, content, source_agent)
+           VALUES ('v6-bx-l2', 'c', 'codex') RETURNING id""",
+    )
+    batch_id = "test-v6-cross-agent-skip"
+    await db_pool.execute(
+        """INSERT INTO backlog_analysis
+           (batch_run_id, lesson_a_id, lesson_b_id, cosine_similarity, judge_model,
+            verdict, confidence, reasoning, left_source_agent, right_source_agent)
+           VALUES ($1, $2, $3, 0.99, 'test-model', 'duplicate', 0.95, 'test',
+                   'claude', 'codex')""",
+        batch_id, L1["id"], L2["id"],
+    )
+
+    L3 = await db_pool.fetchrow(
+        """INSERT INTO lessons (title, content, source_agent)
+           VALUES ('v6-bx-l3', 'c', 'claude') RETURNING id""",
+    )
+    L4 = await db_pool.fetchrow(
+        """INSERT INTO lessons (title, content, source_agent)
+           VALUES ('v6-bx-l4', 'c', 'claude') RETURNING id""",
+    )
+    await db_pool.execute(
+        """INSERT INTO backlog_analysis
+           (batch_run_id, lesson_a_id, lesson_b_id, cosine_similarity, judge_model,
+            verdict, confidence, reasoning, left_source_agent, right_source_agent)
+           VALUES ($1, $2, $3, 0.99, 'test-model', 'duplicate', 0.95, 'test',
+                   'claude', 'claude')""",
+        batch_id, L3["id"], L4["id"],
+    )
+
+    try:
+        rows = await fetch_candidate_rows(
+            pool=db_pool, batch_run_id=batch_id,
+            verdict_in=["duplicate"], confidence_gte=0.90,
+        )
+        pair_sets = [{r["lesson_a_id"], r["lesson_b_id"]} for r in rows]
+        assert {L1["id"], L2["id"]} not in pair_sets, "cross-agent pair leaked"
+        assert {L3["id"], L4["id"]} in pair_sets, "same-agent pair missing"
+    finally:
+        await db_pool.execute(
+            "DELETE FROM backlog_analysis WHERE batch_run_id = $1", batch_id,
+        )
+        await db_pool.execute(
+            "DELETE FROM lessons WHERE id IN ($1, $2, $3, $4)",
+            L1["id"], L2["id"], L3["id"], L4["id"],
+        )

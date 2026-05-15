@@ -104,6 +104,7 @@ async def fetch_candidate_rows(
         WHERE ba.batch_run_id = $1
           AND ba.verdict = ANY($2)
           AND ba.confidence >= $3
+          AND ba.left_source_agent = ba.right_source_agent
         ORDER BY ba.confidence DESC
         """,
         batch_run_id, verdict_in, confidence_gte,
