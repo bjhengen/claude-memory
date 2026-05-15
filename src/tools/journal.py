@@ -65,6 +65,7 @@ async def read_journal(
     tags: list[str] = None,
     project: str = None,
     limit: int = 10,
+    source_agent: str = None,
     ctx: Context = None
 ) -> str:
     """
@@ -75,6 +76,8 @@ async def read_journal(
         tags: Filter by tags (optional)
         project: Filter by project (optional)
         limit: Maximum entries to return
+        source_agent: Filter by agent family (e.g. 'claude', 'codex'). Default
+            None returns the shared cross-agent corpus.
     """
     app = ctx.request_context.lifespan_context
 
@@ -99,6 +102,11 @@ async def read_journal(
     if tags:
         conditions.append(f"j.tags && ${param_idx}")
         params.append(tags)
+        param_idx += 1
+
+    if source_agent:
+        conditions.append(f"j.source_agent = ${param_idx}")
+        params.append(source_agent)
         param_idx += 1
 
     where_clause = " AND ".join(conditions) if conditions else "1=1"

@@ -541,6 +541,128 @@ async def test_resolve_conflict_requires_admin(db_pool):
 
 
 @pytest.mark.asyncio
+async def test_search_lessons_filters_by_source_agent(db_pool, mock_openai):
+    """Optional source_agent filter narrows results to a single agent family."""
+    from src.tools.search import search_lessons
+
+    L_claude = await db_pool.fetchrow(
+        """INSERT INTO lessons (title, content, source_agent)
+           VALUES ('v6-filter-claude', 'unique-search-needle-9999', 'claude') RETURNING id""",
+    )
+    L_codex = await db_pool.fetchrow(
+        """INSERT INTO lessons (title, content, source_agent)
+           VALUES ('v6-filter-codex', 'unique-search-needle-9999', 'codex') RETURNING id""",
+    )
+    try:
+        result = await search_lessons(
+            query=None,
+            source_agent="codex",
+            ctx=_ctx(db_pool, mock_openai),
+        )
+        payload = _json.loads(result)
+        ids = {r["id"] for r in payload.get("lessons", [])}
+        assert L_codex["id"] in ids
+        assert L_claude["id"] not in ids
+    finally:
+        await db_pool.execute(
+            "DELETE FROM lessons WHERE id IN ($1, $2)", L_claude["id"], L_codex["id"],
+        )
+
+
+@pytest.mark.asyncio
+async def test_search_lessons_default_returns_all_agents(db_pool, mock_openai):
+    """Default (no source_agent kwarg) returns the shared cross-agent corpus."""
+    from src.tools.search import search_lessons
+
+    L_claude = await db_pool.fetchrow(
+        """INSERT INTO lessons (title, content, source_agent)
+           VALUES ('v6-default-claude', 'unique-default-needle-8888', 'claude') RETURNING id""",
+    )
+    L_codex = await db_pool.fetchrow(
+        """INSERT INTO lessons (title, content, source_agent)
+           VALUES ('v6-default-codex', 'unique-default-needle-8888', 'codex') RETURNING id""",
+    )
+    try:
+        result = await search_lessons(
+            query=None,
+            ctx=_ctx(db_pool, mock_openai),
+            limit=50,
+        )
+        payload = _json.loads(result)
+        ids = {r["id"] for r in payload.get("lessons", [])}
+        assert L_codex["id"] in ids
+        assert L_claude["id"] in ids
+    finally:
+        await db_pool.execute(
+            "DELETE FROM lessons WHERE id IN ($1, $2)", L_claude["id"], L_codex["id"],
+        )
+
+
+@pytest.mark.asyncio
+async def test_read_journal_filters_by_source_agent(db_pool, mock_openai):
+    """Journal read filter narrows to a single agent family."""
+    from src.tools.journal import read_journal
+
+    J_claude = await db_pool.fetchrow(
+        """INSERT INTO journal (content, tags, source_agent)
+           VALUES ('claude journal entry v6', ARRAY['v6-jrn-filter']::TEXT[], 'claude') RETURNING id""",
+    )
+    J_codex = await db_pool.fetchrow(
+        """INSERT INTO journal (content, tags, source_agent)
+           VALUES ('codex journal entry v6', ARRAY['v6-jrn-filter']::TEXT[], 'codex') RETURNING id""",
+    )
+    try:
+        result = await read_journal(
+            tags=["v6-jrn-filter"],
+            source_agent="codex",
+            ctx=_ctx(db_pool, mock_openai),
+        )
+        payload = _json.loads(result)
+        ids = {r["id"] for r in payload.get("entries", [])}
+        assert J_codex["id"] in ids
+        assert J_claude["id"] not in ids
+    finally:
+        await db_pool.execute(
+            "DELETE FROM journal WHERE id IN ($1, $2)", J_claude["id"], J_codex["id"],
+        )
+
+
+@pytest.mark.asyncio
+async def test_search_filters_by_source_agent(db_pool, mock_openai):
+    """Unified search post-filters by source_agent when provided."""
+    from src.tools.search import search
+
+    needle = "unique-unified-search-needle-7777"
+    L_claude = await db_pool.fetchrow(
+        f"""INSERT INTO lessons (title, content, source_agent, embedding)
+           VALUES ('v6-uni-claude', '{needle}', 'claude',
+                   ('[' || array_to_string(ARRAY(SELECT 0.1 FROM generate_series(1,1536)), ',') || ']')::vector)
+           RETURNING id""",
+    )
+    L_codex = await db_pool.fetchrow(
+        f"""INSERT INTO lessons (title, content, source_agent, embedding)
+           VALUES ('v6-uni-codex', '{needle}', 'codex',
+                   ('[' || array_to_string(ARRAY(SELECT 0.1 FROM generate_series(1,1536)), ',') || ']')::vector)
+           RETURNING id""",
+    )
+    try:
+        result = await search(
+            query=needle,
+            limit=50,
+            source_agent="codex",
+            ctx=_ctx(db_pool, mock_openai),
+        )
+        payload = _json.loads(result)
+        ids_and_types = {(r["type"], r["id"]) for r in payload.get("results", [])}
+        assert ("lesson", L_codex["id"]) in ids_and_types
+        assert ("lesson", L_claude["id"]) not in ids_and_types
+    finally:
+        await db_pool.execute(
+            "DELETE FROM lessons WHERE id IN ($1, $2)", L_claude["id"], L_codex["id"],
+        )
+
+
+@pytest.mark.asyncio
 async def test_end_session_stamps_project_state(db_pool, mock_openai):
     from src.tools.sessions import start_session, end_session
     m = await db_pool.fetchrow(

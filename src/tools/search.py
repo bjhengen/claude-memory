@@ -10,7 +10,12 @@ from src.helpers import resolve_project_id
 
 
 @mcp.tool()
-async def search(query: str, limit: int = 5, ctx: Context = None) -> str:
+async def search(
+    query: str,
+    limit: int = 5,
+    source_agent: str = None,
+    ctx: Context = None,
+) -> str:
     """
     Semantic search across lessons, patterns, and session history.
     Returns the most relevant matches based on meaning, not just keywords.
@@ -18,16 +23,59 @@ async def search(query: str, limit: int = 5, ctx: Context = None) -> str:
     Args:
         query: What you're looking for (natural language)
         limit: Maximum number of results (default 5)
+        source_agent: Filter by agent family (e.g. 'claude', 'codex'). Default
+            None returns the shared cross-agent corpus.
     """
     app = ctx.request_context.lifespan_context
 
     embedding = await get_embedding(app.openai, query)
     embedding_str = format_embedding(embedding)
 
+    # When source_agent is set, oversample so post-filtering still has enough.
+    fetch_limit = limit * 5 if source_agent else limit
     rows = await app.db.fetch(
         "SELECT * FROM semantic_search($1::vector, $2, $3)",
-        embedding_str, query, limit
+        embedding_str, query, fetch_limit
     )
+
+    if not rows:
+        return json.dumps({"results": [], "message": "No matches found"})
+
+    # Optional post-filter by source_agent. The semantic_search SQL function
+    # does not return source_agent, so we batch-look-up per source table.
+    if source_agent:
+        # Group IDs by source_type to do one query per table.
+        type_to_ids: dict[str, list[int]] = {}
+        for row in rows:
+            type_to_ids.setdefault(row["source_type"], []).append(row["source_id"])
+
+        # Map source_type -> SQL table name. Tables without source_agent are
+        # excluded entirely when a filter is requested (no way to attribute).
+        source_table = {
+            "lesson": "lessons",
+            "pattern": "patterns",
+            "journal": "journal",
+            "agent_spec": "agent_specs",
+            "specification": "specifications",
+            "mcp_server": "mcp_servers",
+            # "session" and "mcp_tool" have no source_agent column or are
+            # junction-style; they are filtered out when source_agent is set.
+        }
+
+        allowed: set[tuple[str, int]] = set()
+        for stype, ids in type_to_ids.items():
+            table = source_table.get(stype)
+            if not table:
+                continue
+            attr_rows = await app.db.fetch(
+                f"SELECT id FROM {table} WHERE id = ANY($1::int[]) AND source_agent = $2",
+                ids, source_agent,
+            )
+            for r in attr_rows:
+                allowed.add((stype, r["id"]))
+
+        rows = [r for r in rows if (r["source_type"], r["source_id"]) in allowed]
+        rows = rows[:limit]
 
     if not rows:
         return json.dumps({"results": [], "message": "No matches found"})
@@ -58,6 +106,7 @@ async def search_lessons(
     severity: str = None,
     limit: int = 10,
     include_retired: bool = False,
+    source_agent: str = None,
     ctx: Context = None
 ) -> str:
     """
@@ -70,6 +119,8 @@ async def search_lessons(
         severity: Filter by severity: critical, important, tip (optional)
         limit: Maximum results
         include_retired: Include retired lessons (default False)
+        source_agent: Filter by agent family (e.g. 'claude', 'codex'). Default
+            None returns the shared cross-agent corpus.
     """
     app = ctx.request_context.lifespan_context
 
@@ -100,6 +151,11 @@ async def search_lessons(
     if tags:
         conditions.append(f"l.tags && ${param_idx}")
         params.append(tags)
+        param_idx += 1
+
+    if source_agent:
+        conditions.append(f"l.source_agent = ${param_idx}")
+        params.append(source_agent)
         param_idx += 1
 
     if not include_retired:
