@@ -497,7 +497,7 @@ async def test_codex_cannot_clear_claude_annotation(db_pool):
     try:
         with pytest.raises(PermissionError):
             await clear_annotation(
-                entity_type="lesson", entity_id=L["id"], ctx=_ctx(db_pool),
+                annotation_id=A["id"], ctx=_ctx(db_pool),
             )
     finally:
         await db_pool.execute("DELETE FROM annotations WHERE id = $1", A["id"])

@@ -124,40 +124,24 @@ async def get_annotations(
 
 @mcp.tool()
 async def clear_annotation(
-    entity_type: str,
-    entity_id: int,
+    annotation_id: int,
     ctx: Context = None
 ) -> str:
     """
-    Delete the annotation attached to an entity.
+    Delete an annotation by its ID.
 
     Args:
-        entity_type: Type of entity (lesson, spec, agent, project, mcp_server, mcp_tool)
-        entity_id: ID of the entity whose annotation should be cleared
+        annotation_id: ID of the annotation to delete
     """
     app = ctx.request_context.lifespan_context
 
-    if entity_type not in VALID_ENTITY_TYPES:
-        return json.dumps({
-            "error": f"Invalid entity_type '{entity_type}'. Must be one of: {', '.join(sorted(VALID_ENTITY_TYPES))}"
-        })
-
-    existing = await app.db.fetchrow(
-        "SELECT id FROM annotations WHERE entity_type = $1 AND entity_id = $2",
-        entity_type, entity_id,
-    )
-    if not existing:
-        return json.dumps({
-            "success": False,
-            "message": f"No annotation found for {entity_type} {entity_id}"
-        })
-
-    annotation_id = existing["id"]
+    # Rule-b: assert_can_write looks up source_agent for this annotation row
+    # and raises PermissionError if the current identity doesn't own it.
     await assert_can_write(app.db, "annotations", annotation_id)
 
     result = await app.db.execute(
         "DELETE FROM annotations WHERE id = $1",
-        annotation_id,
+        annotation_id
     )
 
     if result == "DELETE 1":
