@@ -25,12 +25,25 @@ async def get_project(name: str, ctx: Context = None) -> str:
     if not project_id:
         return json.dumps({"error": f"Project '{name}' not found"})
 
-    # Get project
+    # Get project + computed last-activity timestamp.
+    # `projects.updated_at` only bumps on the projects row itself (creation +
+    # claude_md edits + add_project upsert). Real activity lives on related
+    # tables (project_state, lessons, journal, sessions). GREATEST ignores
+    # NULLs in PostgreSQL, so projects with no related rows fall back to
+    # projects.updated_at.
     project = await app.db.fetchrow(
         """
-        SELECT p.*, m.name as machine_name, m.ssh_command
+        SELECT p.*, m.name as machine_name, m.ssh_command,
+               GREATEST(
+                   p.updated_at,
+                   ps.updated_at,
+                   (SELECT MAX(learned_at) FROM lessons WHERE project_id = p.id),
+                   (SELECT MAX(entry_date) FROM journal WHERE project_id = p.id),
+                   (SELECT MAX(ended_at) FROM sessions WHERE project_id = p.id)
+               ) AS last_activity_at
         FROM projects p
         LEFT JOIN machines m ON p.machine_id = m.id
+        LEFT JOIN project_state ps ON ps.project_id = p.id
         WHERE p.id = $1
         """,
         project_id
@@ -69,7 +82,8 @@ async def get_project(name: str, ctx: Context = None) -> str:
             "status": project["status"],
             "tech_stack": project["tech_stack"],
             "current_phase": project["current_phase"],
-            "updated_at": project["updated_at"].isoformat() if project["updated_at"] else None
+            "updated_at": project["updated_at"].isoformat() if project["updated_at"] else None,
+            "last_activity_at": project["last_activity_at"].isoformat() if project["last_activity_at"] else None
         },
         "approaches": [
             {
