@@ -208,21 +208,30 @@ import src.tools.backlog_apply  # noqa: E402, F401
 app = mcp.streamable_http_app()
 
 
-@app.on_event("startup")
-async def startup():
-    """Create the shared DB pool at ASGI app startup (before any requests)."""
+# `@app.on_event("startup"/"shutdown")` is silently ignored by the Starlette app that
+# `mcp.streamable_http_app()` returns (modern Starlette uses lifespan context managers;
+# on_event is deprecated and no longer routed). Compose our pool init around MCP's
+# own lifespan (which initializes the StreamableHTTPSessionManager's task group).
+_mcp_lifespan = app.router.lifespan_context
+
+
+@asynccontextmanager
+async def _app_lifespan(_app):
+    """Create the shared DB pool, then delegate to MCP's lifespan, then teardown."""
     await _ensure_pool()
     logger.info("ASGI app startup complete — pool ready for OAuth and MCP")
+    try:
+        async with _mcp_lifespan(_app):
+            yield
+    finally:
+        global _db_pool
+        if _db_pool is not None:
+            await _db_pool.close()
+            _db_pool = None
+            logger.info("Database connection pool closed")
 
 
-@app.on_event("shutdown")
-async def shutdown():
-    """Close the shared DB pool on ASGI app shutdown."""
-    global _db_pool
-    if _db_pool is not None:
-        await _db_pool.close()
-        _db_pool = None
-        logger.info("Database connection pool closed")
+app.router.lifespan_context = _app_lifespan
 
 
 if __name__ == "__main__":
