@@ -28,7 +28,10 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql://claude:${POSTGRES_PASSWORD:-claude_memory_secret}@db:5432/claude_memory
+      # LLM API keys — provided by frsecrets-deploy.sh from AWS SSM in prod.
+      # No default: compose errors loudly if shell env doesn't supply these (intentional).
       OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       CLAUDE_MEMORY_API_KEY: ${CLAUDE_MEMORY_API_KEY:-change-this-key}
     ports:
       - "127.0.0.1:8004:8003"  # Only accessible from localhost for nginx proxy
