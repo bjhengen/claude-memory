@@ -18,7 +18,7 @@
 **Step 1: Backup the live database**
 
 ```bash
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@ec2-44-212-169-119.compute-1.amazonaws.com \
+ssh -i ~/.ssh/your-key.pem ubuntu@ec2.example.com \
   "docker exec claude_memory_db pg_dump -U claude claude_memory" > backups/claude_memory_$(date +%Y%m%d_%H%M%S).sql
 ```
 
@@ -1884,22 +1884,22 @@ git push origin main
 
 ```bash
 # Upload new tool modules
-scp -i ~/.ssh/AWS_FR.pem src/tools/agents.py ubuntu@ec2-44-212-169-119.compute-1.amazonaws.com:~/claude-memory/src/tools/
-scp -i ~/.ssh/AWS_FR.pem src/tools/specs.py ubuntu@ec2-44-212-169-119.compute-1.amazonaws.com:~/claude-memory/src/tools/
-scp -i ~/.ssh/AWS_FR.pem src/tools/mcp_registry.py ubuntu@ec2-44-212-169-119.compute-1.amazonaws.com:~/claude-memory/src/tools/
+scp -i ~/.ssh/your-key.pem src/tools/agents.py ubuntu@ec2.example.com:~/claude-memory/src/tools/
+scp -i ~/.ssh/your-key.pem src/tools/specs.py ubuntu@ec2.example.com:~/claude-memory/src/tools/
+scp -i ~/.ssh/your-key.pem src/tools/mcp_registry.py ubuntu@ec2.example.com:~/claude-memory/src/tools/
 
 # Upload modified files
-scp -i ~/.ssh/AWS_FR.pem src/tools/search.py ubuntu@ec2-44-212-169-119.compute-1.amazonaws.com:~/claude-memory/src/tools/
-scp -i ~/.ssh/AWS_FR.pem src/server.py ubuntu@ec2-44-212-169-119.compute-1.amazonaws.com:~/claude-memory/src/
+scp -i ~/.ssh/your-key.pem src/tools/search.py ubuntu@ec2.example.com:~/claude-memory/src/tools/
+scp -i ~/.ssh/your-key.pem src/server.py ubuntu@ec2.example.com:~/claude-memory/src/
 
 # Upload migration
-scp -i ~/.ssh/AWS_FR.pem migrations/003_v3_codified_context.sql ubuntu@ec2-44-212-169-119.compute-1.amazonaws.com:~/claude-memory/migrations/
+scp -i ~/.ssh/your-key.pem migrations/003_v3_codified_context.sql ubuntu@ec2.example.com:~/claude-memory/migrations/
 ```
 
 **Step 3: Apply migration on EC2**
 
 ```bash
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@ec2-44-212-169-119.compute-1.amazonaws.com \
+ssh -i ~/.ssh/your-key.pem ubuntu@ec2.example.com \
   "docker exec -i claude_memory_db psql -U claude claude_memory < ~/claude-memory/migrations/003_v3_codified_context.sql"
 ```
 
@@ -1908,14 +1908,14 @@ Expected: Table creation confirmations, no errors
 **Step 4: Rebuild and restart the MCP container**
 
 ```bash
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@ec2-44-212-169-119.compute-1.amazonaws.com \
+ssh -i ~/.ssh/your-key.pem ubuntu@ec2.example.com \
   "cd ~/claude-memory && docker-compose up -d --build mcp"
 ```
 
 **Step 5: Verify health**
 
 ```bash
-curl -s https://memory.friendly-robots.com/health
+curl -s https://memory.example.com/health
 ```
 
 Expected: `{"status": "healthy"}`
@@ -1953,7 +1953,7 @@ Call `register_mcp_server`:
 - name: `claude-memory`
 - description: `Cross-machine persistent memory for Claude sessions. Stores lessons, patterns, journal entries, project context, agent specs, specification documents, and MCP server catalog.`
 - transport: `streamable-http`
-- url: `https://memory.friendly-robots.com/mcp`
+- url: `https://memory.example.com/mcp`
 - machine: `aws-ec2` (or whatever the machine name is)
 - auth_type: `oauth`
 - auth_hint: `OAuth 2.0 via Claude Desktop auto-registration, or API key via CLAUDE_MEMORY_API_KEY header`

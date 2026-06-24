@@ -16,7 +16,7 @@ async def get_project(name: str, ctx: Context = None) -> str:
     Get full context for a project including current state, approaches, and key files.
 
     Args:
-        name: Project name (e.g., 'recipe.sync', 'wine.dine Pro')
+        name: Project name (e.g., 'example-api', 'example-mobile-app')
     """
     app = ctx.request_context.lifespan_context
 

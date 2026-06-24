@@ -7,7 +7,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: claude
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-claude_memory_secret}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
       POSTGRES_DB: claude_memory
     volumes:
       - claude_memory_data:/var/lib/postgresql/data
@@ -27,12 +27,15 @@ services:
     container_name: claude_memory_mcp
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql://claude:${POSTGRES_PASSWORD:-claude_memory_secret}@db:5432/claude_memory
-      # LLM API keys — provided by frsecrets-deploy.sh from AWS SSM in prod.
-      # No default: compose errors loudly if shell env doesn't supply these (intentional).
+      DATABASE_URL: postgresql://claude:${POSTGRES_PASSWORD:-changeme}@db:5432/claude_memory
+      # LLM API keys — supply via shell env / your secrets manager in prod.
+      # No default: compose errors loudly if the shell env doesn't supply these (intentional).
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       CLAUDE_MEMORY_API_KEY: ${CLAUDE_MEMORY_API_KEY:-change-this-key}
+      # Public host the server is served under (behind nginx/TLS). Set in prod env.
+      PUBLIC_HOST: ${PUBLIC_HOST:-}
+      OAUTH_ISSUER_URL: ${OAUTH_ISSUER_URL:-}
     ports:
       - "127.0.0.1:8004:8003"  # Only accessible from localhost for nginx proxy
     depends_on:

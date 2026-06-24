@@ -12,7 +12,7 @@ async def db_pool():
     """
     Connection pool for a local test database.
 
-    Default targets the slmbeast test container at localhost:5434. Override via
+    Default targets the ai-server test container at localhost:5434. Override via
     TEST_DATABASE_URL when running from elsewhere.
     """
     url = os.getenv(

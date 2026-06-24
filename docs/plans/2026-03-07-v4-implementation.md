@@ -1000,20 +1000,20 @@ git commit -m "feat: auto-inject annotations into get_spec and get_agent"
 **Step 1: Upload changed files to EC2**
 
 ```bash
-scp -i ~/.ssh/AWS_FR.pem src/tools/annotations.py ubuntu@44.212.169.119:~/claude-memory/src/tools/
-scp -i ~/.ssh/AWS_FR.pem src/tools/lessons.py ubuntu@44.212.169.119:~/claude-memory/src/tools/
-scp -i ~/.ssh/AWS_FR.pem src/tools/search.py ubuntu@44.212.169.119:~/claude-memory/src/tools/
-scp -i ~/.ssh/AWS_FR.pem src/tools/specs.py ubuntu@44.212.169.119:~/claude-memory/src/tools/
-scp -i ~/.ssh/AWS_FR.pem src/tools/agents.py ubuntu@44.212.169.119:~/claude-memory/src/tools/
-scp -i ~/.ssh/AWS_FR.pem src/server.py ubuntu@44.212.169.119:~/claude-memory/src/
-scp -i ~/.ssh/AWS_FR.pem src/helpers.py ubuntu@44.212.169.119:~/claude-memory/src/
-scp -i ~/.ssh/AWS_FR.pem db/migrations/v4_feedback_loop.sql ubuntu@44.212.169.119:~/claude-memory/db/migrations/
+scp -i ~/.ssh/your-key.pem src/tools/annotations.py ubuntu@ec2.example.com:~/claude-memory/src/tools/
+scp -i ~/.ssh/your-key.pem src/tools/lessons.py ubuntu@ec2.example.com:~/claude-memory/src/tools/
+scp -i ~/.ssh/your-key.pem src/tools/search.py ubuntu@ec2.example.com:~/claude-memory/src/tools/
+scp -i ~/.ssh/your-key.pem src/tools/specs.py ubuntu@ec2.example.com:~/claude-memory/src/tools/
+scp -i ~/.ssh/your-key.pem src/tools/agents.py ubuntu@ec2.example.com:~/claude-memory/src/tools/
+scp -i ~/.ssh/your-key.pem src/server.py ubuntu@ec2.example.com:~/claude-memory/src/
+scp -i ~/.ssh/your-key.pem src/helpers.py ubuntu@ec2.example.com:~/claude-memory/src/
+scp -i ~/.ssh/your-key.pem db/migrations/v4_feedback_loop.sql ubuntu@ec2.example.com:~/claude-memory/db/migrations/
 ```
 
 **Step 2: Run the migration**
 
 ```bash
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@44.212.169.119 \
+ssh -i ~/.ssh/your-key.pem ubuntu@ec2.example.com \
   "docker exec -i claude_memory_db psql -U claude -d claude_memory < ~/claude-memory/db/migrations/v4_feedback_loop.sql"
 ```
 
@@ -1022,9 +1022,9 @@ ssh -i ~/.ssh/AWS_FR.pem ubuntu@44.212.169.119 \
 Use the docker-compose v1 workaround (lesson #339):
 
 ```bash
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@44.212.169.119 "cd ~/claude-memory && docker-compose build mcp"
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@44.212.169.119 "docker stop claude_memory_mcp && docker rm claude_memory_mcp"
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@44.212.169.119 "cd ~/claude-memory && source .env && docker run -d \
+ssh -i ~/.ssh/your-key.pem ubuntu@ec2.example.com "cd ~/claude-memory && docker-compose build mcp"
+ssh -i ~/.ssh/your-key.pem ubuntu@ec2.example.com "docker stop claude_memory_mcp && docker rm claude_memory_mcp"
+ssh -i ~/.ssh/your-key.pem ubuntu@ec2.example.com "cd ~/claude-memory && source .env && docker run -d \
   --name claude_memory_mcp \
   --restart unless-stopped \
   --network claude-memory_claude_memory_net \
@@ -1038,7 +1038,7 @@ ssh -i ~/.ssh/AWS_FR.pem ubuntu@44.212.169.119 "cd ~/claude-memory && source .en
 **Step 4: Verify health**
 
 ```bash
-curl -s https://memory.friendly-robots.com/health
+curl -s https://memory.example.com/health
 ```
 
 Expected: `{"status": "healthy", "service": "claude-memory"}`
@@ -1046,7 +1046,7 @@ Expected: `{"status": "healthy", "service": "claude-memory"}`
 **Step 5: Verify new tools are registered**
 
 ```bash
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@44.212.169.119 \
+ssh -i ~/.ssh/your-key.pem ubuntu@ec2.example.com \
   "docker exec claude_memory_mcp python3 -c \"from src.server import mcp; print([t for t in mcp._tool_manager._tools.keys() if 'annot' in t or 'rate' in t])\""
 ```
 

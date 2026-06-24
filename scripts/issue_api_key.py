@@ -2,7 +2,7 @@
 """Issue a new API key.
 
 Usage:
-    python scripts/issue_api_key.py --family codex --label "Brian Codex laptop" \
+    python scripts/issue_api_key.py --family codex --label "My Codex laptop" \
         [--client-name codex-cli] [--scopes read write]
 
 Prints the raw bearer once to stdout. DB stores only the sha256 hash.

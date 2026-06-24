@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Seed the Claude Memory database with initial data from existing knowledge.
-Run this after deploying to populate the database.
+Seed the Claude Memory database with illustrative example data.
+Run this after deploying to populate the database with a small demo dataset.
 
 Usage:
     python scripts/seed_data.py
@@ -16,7 +16,7 @@ from openai import AsyncOpenAI
 # Configuration
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql://claude:claude_memory_secret@localhost:5433/claude_memory"
+    "postgresql://claude:changeme@localhost:5433/claude_memory"
 )
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
@@ -39,28 +39,28 @@ async def seed_machines(pool: asyncpg.Pool):
     """Seed machines table."""
     machines = [
         {
-            "name": "mac-studio",
+            "name": "workstation",
             "ip": None,
             "ssh_command": None,
-            "notes": "Primary development machine (M1 Pro)"
+            "notes": "Primary development machine"
         },
         {
-            "name": "work-laptop",
+            "name": "laptop",
             "ip": None,
             "ssh_command": None,
-            "notes": "Work laptop for remote development"
+            "notes": "Laptop for remote development"
         },
         {
-            "name": "slmbeast",
+            "name": "ai-server",
             "ip": "<YOUR_LOCAL_SERVER_IP>",
-            "ssh_command": "ssh slmbeast",
-            "notes": "Local AI server running Ollama with Qwen2.5:32b"
+            "ssh_command": "ssh ai-server",
+            "notes": "Local AI server running an Ollama model"
         },
         {
             "name": "aws-ec2",
             "ip": "<YOUR_EC2_IP>",
             "ssh_command": "ssh -i ~/.ssh/<YOUR_KEY>.pem ubuntu@<YOUR_EC2_IP>",
-            "notes": "Primary AWS server running all production workloads"
+            "notes": "Cloud server running production workloads"
         }
     ]
 
@@ -80,15 +80,15 @@ async def seed_machines(pool: asyncpg.Pool):
 async def seed_projects(pool: asyncpg.Pool):
     """Seed projects table."""
     # Get machine IDs
-    mac_studio = await pool.fetchrow("SELECT id FROM machines WHERE name = 'mac-studio'")
-    slmbeast = await pool.fetchrow("SELECT id FROM machines WHERE name = 'slmbeast'")
+    workstation = await pool.fetchrow("SELECT id FROM machines WHERE name = 'workstation'")
+    ai_server = await pool.fetchrow("SELECT id FROM machines WHERE name = 'ai-server'")
     aws = await pool.fetchrow("SELECT id FROM machines WHERE name = 'aws-ec2'")
 
     projects = [
         {
-            "name": "recipe.sync",
-            "path": "~/dev/recipe_sync",
-            "machine_id": mac_studio["id"],
+            "name": "example-mobile-app",
+            "path": "~/dev/example_mobile_app",
+            "machine_id": workstation["id"],
             "status": "active",
             "tech_stack": {
                 "frontend": "Flutter 3.x",
@@ -100,39 +100,15 @@ async def seed_projects(pool: asyncpg.Pool):
             "current_phase": "Beta development"
         },
         {
-            "name": "wine.dine Pro",
-            "path": "~/dev/wine_dine_pro",
-            "machine_id": mac_studio["id"],
+            "name": "example-api",
+            "path": "~/dev/example_api",
+            "machine_id": aws["id"],
             "status": "production",
             "tech_stack": {
-                "frontend": "Flutter 3.32.5",
                 "backend": "FastAPI",
-                "state": "Provider",
-                "subscription": "in_app_purchase"
+                "database": "PostgreSQL"
             },
-            "current_phase": "Production v1.0.8"
-        },
-        {
-            "name": "wine.dine",
-            "path": "~/dev/wine_dine",
-            "machine_id": mac_studio["id"],
-            "status": "production",
-            "tech_stack": {
-                "frontend": "Flutter",
-                "backend": "FastAPI (shared with Pro)"
-            },
-            "current_phase": "Production - free tier"
-        },
-        {
-            "name": "friendly-robots-website",
-            "path": "~/dev/fr_website",
-            "machine_id": mac_studio["id"],
-            "status": "production",
-            "tech_stack": {
-                "frontend": "Static HTML/CSS",
-                "hosting": "Docker + Nginx"
-            },
-            "current_phase": "Deployed"
+            "current_phase": "Production"
         }
     ]
 
@@ -162,25 +138,11 @@ async def seed_containers(pool: asyncpg.Pool):
 
     containers = [
         {
-            "name": "recipe_sync_api",
+            "name": "example_api",
             "machine_id": aws["id"],
-            "project": "recipe.sync",
+            "project": "example-api",
             "ports": "8001:8000",
-            "compose_path": "~/recipe_sync_api/docker-compose.yml"
-        },
-        {
-            "name": "winedine_api",
-            "machine_id": aws["id"],
-            "project": "wine.dine Pro",
-            "ports": "8002:8000",
-            "compose_path": "~/winedine_api/docker-compose.yml"
-        },
-        {
-            "name": "friendly-robots-web",
-            "machine_id": aws["id"],
-            "project": "friendly-robots-website",
-            "ports": "8080:80",
-            "compose_path": "~/fr_website/docker-compose.yml"
+            "compose_path": "~/example_api/docker-compose.yml"
         }
     ]
 
@@ -199,36 +161,29 @@ async def seed_containers(pool: asyncpg.Pool):
 
 async def seed_key_files(pool: asyncpg.Pool):
     """Seed key_files table."""
-    wine_dine = await pool.fetchrow("SELECT id FROM projects WHERE name = 'wine.dine Pro'")
-    recipe_sync = await pool.fetchrow("SELECT id FROM projects WHERE name = 'recipe.sync'")
+    mobile_app = await pool.fetchrow("SELECT id FROM projects WHERE name = 'example-mobile-app'")
+    api = await pool.fetchrow("SELECT id FROM projects WHERE name = 'example-api'")
 
     key_files = [
         {
-            "project_id": wine_dine["id"],
-            "file_path": "lib/ui/subscription_gate.dart",
-            "line_hint": 70,
-            "description": "debugBypass flag - MUST be false in production builds!",
+            "project_id": mobile_app["id"],
+            "file_path": "lib/config/feature_flags.dart",
+            "line_hint": None,
+            "description": "Feature flags - verify debug flags are off in production builds",
             "importance": "critical"
         },
         {
-            "project_id": wine_dine["id"],
-            "file_path": "lib/ui/subscription_screen.dart",
-            "line_hint": None,
-            "description": "Dynamic pricing implementation - uses ProductDetails.price",
-            "importance": "important"
-        },
-        {
-            "project_id": wine_dine["id"],
+            "project_id": mobile_app["id"],
             "file_path": "pubspec.yaml",
-            "line_hint": 19,
+            "line_hint": None,
             "description": "Version number - check before building",
             "importance": "important"
         },
         {
-            "project_id": recipe_sync["id"],
-            "file_path": "memories/DECISIONS.md",
+            "project_id": api["id"],
+            "file_path": "docs/DECISIONS.md",
             "line_hint": None,
-            "description": "All architectural decisions with rationale",
+            "description": "Architectural decisions with rationale",
             "importance": "reference"
         }
     ]
@@ -247,22 +202,14 @@ async def seed_key_files(pool: asyncpg.Pool):
 
 async def seed_guardrails(pool: asyncpg.Pool):
     """Seed guardrails table."""
-    wine_dine = await pool.fetchrow("SELECT id FROM projects WHERE name = 'wine.dine Pro'")
+    mobile_app = await pool.fetchrow("SELECT id FROM projects WHERE name = 'example-mobile-app'")
 
     guardrails = [
         {
-            "project_id": wine_dine["id"],
-            "description": "Verify debugBypass = false before building",
+            "project_id": mobile_app["id"],
+            "description": "Verify debug/bypass flags are disabled before building",
             "check_type": "pre_build",
-            "file_path": "lib/ui/subscription_gate.dart",
-            "pattern": "debugBypass = false",
-            "severity": "critical"
-        },
-        {
-            "project_id": wine_dine["id"],
-            "description": "Use dynamic pricing (ProductDetails.price), never hardcode prices",
-            "check_type": "always",
-            "file_path": None,
+            "file_path": "lib/config/feature_flags.dart",
             "pattern": None,
             "severity": "critical"
         },
@@ -276,7 +223,7 @@ async def seed_guardrails(pool: asyncpg.Pool):
         },
         {
             "project_id": None,
-            "description": "Run flutter clean before release builds",
+            "description": "Run a clean build before release builds",
             "check_type": "pre_build",
             "file_path": None,
             "pattern": None,
@@ -299,8 +246,7 @@ async def seed_guardrails(pool: asyncpg.Pool):
 
 async def seed_lessons(pool: asyncpg.Pool, openai: AsyncOpenAI):
     """Seed lessons table with embeddings."""
-    wine_dine = await pool.fetchrow("SELECT id FROM projects WHERE name = 'wine.dine Pro'")
-    recipe_sync = await pool.fetchrow("SELECT id FROM projects WHERE name = 'recipe.sync'")
+    mobile_app = await pool.fetchrow("SELECT id FROM projects WHERE name = 'example-mobile-app'")
 
     lessons = [
         {
@@ -311,39 +257,18 @@ async def seed_lessons(pool: asyncpg.Pool, openai: AsyncOpenAI):
             "severity": "critical"
         },
         {
-            "title": "Never use debugBypass=true in production",
-            "content": "The debugBypass flag in subscription_gate.dart must ALWAYS be false in production builds. Setting it to true bypasses subscription checks and results in lost revenue. This was learned the hard way.",
-            "project_id": wine_dine["id"],
-            "tags": ["flutter", "subscription", "production"],
-            "severity": "critical"
-        },
-        {
-            "title": "Use dynamic pricing from ProductDetails",
-            "content": "Never hardcode subscription prices like '$1.99'. Always use ProductDetails.price from the in_app_purchase package. App stores require dynamic pricing and will reject apps with hardcoded prices.",
-            "project_id": wine_dine["id"],
+            "title": "Use dynamic pricing from store APIs",
+            "content": "Never hardcode subscription prices in the UI. Always read the localized price from the store's product details API. App stores require dynamic pricing and may reject apps with hardcoded prices.",
+            "project_id": mobile_app["id"],
             "tags": ["flutter", "subscription", "app-store", "google-play"],
-            "severity": "critical"
+            "severity": "important"
         },
         {
             "title": "GoRouter dialogs require navigatorKey pattern",
-            "content": "When using GoRouter, dialogs don't work properly with the default navigation. Use the navigatorKey + currentContext pattern from decision D032 in recipe.sync.",
+            "content": "When using GoRouter, dialogs don't work properly with the default navigation. Use the navigatorKey + currentContext pattern: create a GlobalKey<NavigatorState> and resolve dialog context from it.",
             "project_id": None,
             "tags": ["flutter", "go_router", "dialogs", "navigation"],
             "severity": "important"
-        },
-        {
-            "title": "OpenAI content filters block wine/alcohol content",
-            "content": "OpenAI's vision API may block or refuse to process images containing wine bottles or alcohol-related content due to content filters. Use Claude Opus for wine.dine Pro instead.",
-            "project_id": wine_dine["id"],
-            "tags": ["ai", "openai", "content-filter", "vision"],
-            "severity": "important"
-        },
-        {
-            "title": "Claude Opus 4.5 best for multi-image OCR",
-            "content": "For recipe scanning with multiple images, Claude Opus 4.5 provides the highest accuracy. Haiku is fine for single-page simple recipes, but complex multi-page recipes need Opus.",
-            "project_id": recipe_sync["id"],
-            "tags": ["ai", "claude", "ocr", "recipes"],
-            "severity": "tip"
         },
         {
             "title": "CocoaPods conflicts - delete and rebuild",
@@ -353,8 +278,15 @@ async def seed_lessons(pool: asyncpg.Pool, openai: AsyncOpenAI):
             "severity": "tip"
         },
         {
-            "title": "Policy violations have ~7 day fix window",
-            "content": "When receiving a policy violation notice from Google Play or App Store, you typically have about 7 days to fix and resubmit before the app is removed. Act quickly but don't panic.",
+            "title": "asyncpg requires json.dumps for JSONB fields",
+            "content": "When inserting Python dicts into PostgreSQL JSONB columns via asyncpg, you must use json.dumps() to serialize them first. asyncpg expects strings, not dict objects.",
+            "project_id": None,
+            "tags": ["python", "asyncpg", "postgresql", "jsonb"],
+            "severity": "tip"
+        },
+        {
+            "title": "App store policy violations have a short fix window",
+            "content": "When receiving a policy violation notice from an app store, you typically have only about a week to fix and resubmit before the app is removed. Act quickly but don't panic.",
             "project_id": None,
             "tags": ["app-store", "google-play", "policy"],
             "severity": "important"
@@ -416,8 +348,8 @@ showDialog(
             "applies_to": ["flutter", "go_router", "dialogs"]
         },
         {
-            "name": "AWS Deployment Pattern",
-            "problem": "Need to deploy updated backend code to AWS EC2",
+            "name": "Remote Deployment Pattern",
+            "problem": "Need to deploy updated backend code to a remote server",
             "solution": "SCP files to the server, then docker-compose restart. Always check logs after restart.",
             "code_example": """# Upload files
 scp -i ~/.ssh/<YOUR_KEY>.pem local/file.py ubuntu@<YOUR_EC2_IP>:~/app/
@@ -510,18 +442,16 @@ async def seed_permissions(pool: asyncpg.Pool):
 
 async def seed_workflows(pool: asyncpg.Pool):
     """Seed workflows table."""
-    slmbeast = await pool.fetchrow("SELECT id FROM machines WHERE name = 'slmbeast'")
-
     workflows = [
         {
-            "name": "Local LLM for Recipe Generation",
-            "description": "Use Qwen2.5:32b on slmbeast for recipe-related AI tasks to save API costs",
+            "name": "Local LLM for Offline Tasks",
+            "description": "Use a local Ollama model on the ai-server for routine AI tasks to save API costs",
             "steps": [
-                {"step": 1, "action": "Connect to slmbeast Ollama", "command": "curl http://<YOUR_LOCAL_SERVER_IP>:11434/api/generate"},
-                {"step": 2, "action": "Use qwen2.5:32b model", "notes": "Good balance of speed and quality for recipes"},
-                {"step": 3, "action": "For complex tasks, fall back to Claude API", "notes": None}
+                {"step": 1, "action": "Connect to the local Ollama server", "command": "curl http://<YOUR_LOCAL_SERVER_IP>:11434/api/generate"},
+                {"step": 2, "action": "Use a locally hosted model", "notes": "Good balance of speed and quality for routine tasks"},
+                {"step": 3, "action": "For complex tasks, fall back to a hosted API", "notes": None}
             ],
-            "tools_used": ["ollama", "qwen2.5"],
+            "tools_used": ["ollama"],
             "project_id": None
         }
     ]

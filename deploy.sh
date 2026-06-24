@@ -1,12 +1,15 @@
 #!/bin/bash
-# Deploy Claude Memory to AWS EC2
+# Deploy Claude Memory to a remote host over SSH (rsync + container rebuild).
 
 set -e
 
-# Configuration
-EC2_HOST="ubuntu@44.212.169.119"
-SSH_KEY="~/.ssh/AWS_FR.pem"
-REMOTE_DIR="/home/ubuntu/claude-memory"
+# Configuration — provide these via the environment (e.g. an untracked .deploy.env you source).
+#   EC2_HOST    SSH target, e.g. ubuntu@your-ec2-host
+#   SSH_KEY     path to your private key, e.g. ~/.ssh/your-key.pem
+#   REMOTE_DIR  deploy directory on the host (defaults below)
+EC2_HOST="${EC2_HOST:?set EC2_HOST, e.g. ubuntu@your-ec2-host}"
+SSH_KEY="${SSH_KEY:?set SSH_KEY, e.g. ~/.ssh/your-key.pem}"
+REMOTE_DIR="${REMOTE_DIR:-/home/ubuntu/claude-memory}"
 
 echo "=== Claude Memory Deployment ==="
 
@@ -38,7 +41,7 @@ ssh -i $SSH_KEY $EC2_HOST "cd $REMOTE_DIR && docker-compose ps"
 echo ""
 echo "=== Deployment Complete ==="
 echo ""
-echo "The MCP server is running at: http://localhost:8003/mcp (on EC2)"
+echo "The MCP server is running at: http://localhost:8003/mcp (on the host)"
 echo ""
 echo "To expose via nginx, add the following to your nginx config:"
 echo ""

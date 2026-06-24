@@ -37,7 +37,7 @@ A cross-machine, cross-project memory system for Claude Code sessions. Provides 
 ```sql
 CREATE TABLE machines (
     id SERIAL PRIMARY KEY,
-    name VARCHAR(50) UNIQUE,        -- 'mac-studio', 'work-laptop', 'slmbeast', 'aws-ec2'
+    name VARCHAR(50) UNIQUE,        -- 'workstation', 'laptop', 'ai-server', 'aws-ec2'
     ip VARCHAR(50),
     ssh_command TEXT,
     notes TEXT,
@@ -108,7 +108,7 @@ CREATE TABLE key_files (
 ```sql
 CREATE TABLE permissions (
     id SERIAL PRIMARY KEY,
-    scope VARCHAR(50),              -- 'global', 'project:recipe.sync'
+    scope VARCHAR(50),              -- 'global', 'project:example-api'
     action_type VARCHAR(100),
     pattern TEXT,
     allowed BOOLEAN,
@@ -242,8 +242,8 @@ CREATE INDEX idx_containers_project ON containers(project);
 
 Migrate existing knowledge from:
 - `~/.claude/CLAUDE.md` (global context)
-- `~/dev/recipe_sync/memories/` (project docs)
-- `~/dev/wine_dine_pro/*.md` (project docs)
+- `~/dev/example_api/memories/` (project docs)
+- `~/dev/example_mobile_app/*.md` (project docs)
 
 ## Security
 

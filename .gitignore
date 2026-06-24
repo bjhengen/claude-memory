@@ -4,8 +4,8 @@
 # Git worktrees
 .worktrees/
 
-# Personal infrastructure documentation
-docs/CLAUDE_slmbeast.md
+# Personal infrastructure / per-host documentation
+docs/CLAUDE_*.md
 
 # Point-in-time analysis reports (regenerable from prod DB)
 docs/reports/

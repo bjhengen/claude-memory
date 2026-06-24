@@ -1,6 +1,6 @@
 # CLAUDE.md Updates for V4
 
-Apply these three changes to CLAUDE.md on slmbeast and work laptop.
+Apply these three changes to CLAUDE.md on ai-server and laptop.
 
 ---
 

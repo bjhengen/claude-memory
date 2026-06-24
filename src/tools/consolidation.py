@@ -535,7 +535,7 @@ async def get_consolidation_stats(days: int = 7, ctx: Context = None) -> str:
     """
     Return aggregated claude-memory consolidation activity over the last N days.
 
-    Intended for weekly recap / dashboard use (e.g., Quartermaster's weekly retros).
+    Intended for weekly recap / dashboard use (e.g., weekly retros).
     All window-scoped counts use a [NOW() - days, NOW()] window on the relevant
     timestamp column. `conflicts_pending` and `queue_depth` are always-current
     (no window).

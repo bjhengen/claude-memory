@@ -271,7 +271,7 @@ Fields (mcp_server_tools):
 Generates a single embedding for the query and reuses it across all tier searches. Returns:
 ```json
 {
-  "query": "fixing network sync bug in recipe.sync",
+  "query": "fixing network sync bug in example-api",
   "agents": [{"name": "...", "description": "...", "model": "...", "confidence": "high"}],
   "specifications": [{"title": "...", "subsystem": "...", "summary": "...", "similarity": 0.87}],
   "lessons": [{"title": "...", "content": "...", "similarity": 0.82}],

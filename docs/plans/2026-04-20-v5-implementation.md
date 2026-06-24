@@ -2330,7 +2330,7 @@ Expected: push succeeds.
 
 Run:
 ```bash
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@ec2-44-212-169-119.compute-1.amazonaws.com \
+ssh -i ~/.ssh/your-key.pem ubuntu@ec2.example.com \
   'docker cp ~/claude-memory/db/migrations/v5_consolidation.sql claude_memory_db:/tmp/ && \
    docker exec claude_memory_db psql -U claude -d claude_memory -f /tmp/v5_consolidation.sql'
 ```
@@ -2340,7 +2340,7 @@ Expected: three `CREATE TABLE` messages, no errors.
 
 Run:
 ```bash
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@ec2-44-212-169-119.compute-1.amazonaws.com \
+ssh -i ~/.ssh/your-key.pem ubuntu@ec2.example.com \
   'cd ~/claude-memory && git pull origin main && docker-compose build mcp'
 ```
 Expected: image builds without errors.
@@ -2349,7 +2349,7 @@ Expected: image builds without errors.
 
 Run:
 ```bash
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@ec2-44-212-169-119.compute-1.amazonaws.com \
+ssh -i ~/.ssh/your-key.pem ubuntu@ec2.example.com \
   'docker stop claude_memory_mcp && docker rm claude_memory_mcp && \
    docker run -d --name claude_memory_mcp \
      --network claude-memory_claude_memory_net \

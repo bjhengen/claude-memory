@@ -12,7 +12,7 @@ from openai import AsyncOpenAI
 # Connect via SSH tunnel (run: ssh -L 5433:localhost:5433 -i ~/.ssh/<YOUR_KEY>.pem ubuntu@<YOUR_EC2_IP>)
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql://claude:claude_memory_secret@localhost:5433/claude_memory"
+    "postgresql://claude:changeme@localhost:5433/claude_memory"
 )
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
@@ -33,7 +33,7 @@ def format_embedding(embedding: list[float]) -> str:
 
 async def add_claude_memory_project(pool: asyncpg.Pool):
     """Add the claude-memory project."""
-    mac_studio = await pool.fetchrow("SELECT id FROM machines WHERE name = 'mac-studio'")
+    mac_studio = await pool.fetchrow("SELECT id FROM machines WHERE name = 'workstation'")
     aws = await pool.fetchrow("SELECT id FROM machines WHERE name = 'aws-ec2'")
 
     # Add the project
@@ -85,7 +85,7 @@ async def add_claude_memory_project(pool: asyncpg.Pool):
         {
             "file_path": "src/server.py",
             "line_hint": None,
-            "description": "MCP server with 16 tools for memory operations",
+            "description": "MCP server with 57 tools for memory operations",
             "importance": "critical"
         },
         {
@@ -162,7 +162,7 @@ async def add_session_lessons(pool: asyncpg.Pool, openai: AsyncOpenAI):
 
 async def log_session(pool: asyncpg.Pool):
     """Log this session."""
-    mac_studio = await pool.fetchrow("SELECT id FROM machines WHERE name = 'mac-studio'")
+    mac_studio = await pool.fetchrow("SELECT id FROM machines WHERE name = 'workstation'")
     project = await pool.fetchrow("SELECT id FROM projects WHERE name = 'claude-memory'")
 
     # Create session
@@ -201,11 +201,11 @@ async def log_session(pool: asyncpg.Pool):
         },
         {
             "item_type": "completed",
-            "description": "Implemented MCP server with 16 tools (search, log_lesson, start_session, get_project, etc.)"
+            "description": "Implemented MCP server with 57 tools (search, log_lesson, start_session, get_project, etc.)"
         },
         {
             "item_type": "completed",
-            "description": "Deployed to AWS EC2 at memory.friendly-robots.com (port 8004 externally, nginx reverse proxy)"
+            "description": "Deployed to AWS EC2 at memory.example.com (port 8004 externally, nginx reverse proxy)"
         },
         {
             "item_type": "completed",

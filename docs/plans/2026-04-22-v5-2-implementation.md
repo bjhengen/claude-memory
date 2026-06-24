@@ -10,7 +10,7 @@
 
 **Design doc:** `docs/plans/2026-04-22-v5-2-backlog-apply-design.md` (e69653d)
 
-**Dev environment:** Same rsync-to-slmbeast workflow as v5 / v5.1. Test DB at `postgresql://claude:claude@slmbeast:5434/claude_memory_test` already has the v5 + v5.1 schema.
+**Dev environment:** Same rsync-to-ai-server workflow as v5 / v5.1. Test DB at `postgresql://claude:claude@ai-server:5434/claude_memory_test` already has the v5 + v5.1 schema.
 
 **Branching:** All work on a new feature branch `v5-2-backlog-apply`, fast-forward merged to `main` at completion. Keep the branch as a marker (matches v5 and v5.1 convention).
 
@@ -137,8 +137,8 @@ async def test_pick_canonical_handles_null_learned_at(db_pool):
 - [ ] **Step 2: Sync and run the tests (expect FAIL — module missing)**
 
 ```bash
-rsync -av ~/dev/claude-memory/tests/test_apply_canonical.py slmbeast:~/dev/claude-memory/tests/test_apply_canonical.py
-ssh slmbeast "cd ~/dev/claude-memory && source venv/bin/activate && pytest tests/test_apply_canonical.py -v 2>&1 | tail -10"
+rsync -av ~/dev/claude-memory/tests/test_apply_canonical.py ai-server:~/dev/claude-memory/tests/test_apply_canonical.py
+ssh ai-server "cd ~/dev/claude-memory && source venv/bin/activate && pytest tests/test_apply_canonical.py -v 2>&1 | tail -10"
 ```
 
 Expected: ModuleNotFoundError for `src.tools.backlog_apply`.
@@ -194,8 +194,8 @@ async def _pick_canonical(conn, a_id: int, b_id: int) -> tuple[int, int]:
 - [ ] **Step 4: Sync and re-run the tests (expect PASS)**
 
 ```bash
-rsync -av ~/dev/claude-memory/src/tools/backlog_apply.py slmbeast:~/dev/claude-memory/src/tools/backlog_apply.py
-ssh slmbeast "cd ~/dev/claude-memory && source venv/bin/activate && pytest tests/test_apply_canonical.py -v 2>&1 | tail -10"
+rsync -av ~/dev/claude-memory/src/tools/backlog_apply.py ai-server:~/dev/claude-memory/src/tools/backlog_apply.py
+ssh ai-server "cd ~/dev/claude-memory && source venv/bin/activate && pytest tests/test_apply_canonical.py -v 2>&1 | tail -10"
 ```
 
 Expected: 3 PASSED.
@@ -291,8 +291,8 @@ def test_classify_mixed_batch():
 - [ ] **Step 2: Sync and run the tests (expect FAIL)**
 
 ```bash
-rsync -av ~/dev/claude-memory/tests/test_apply_eligibility.py slmbeast:~/dev/claude-memory/tests/test_apply_eligibility.py
-ssh slmbeast "cd ~/dev/claude-memory && source venv/bin/activate && pytest tests/test_apply_eligibility.py -v 2>&1 | tail -10"
+rsync -av ~/dev/claude-memory/tests/test_apply_eligibility.py ai-server:~/dev/claude-memory/tests/test_apply_eligibility.py
+ssh ai-server "cd ~/dev/claude-memory && source venv/bin/activate && pytest tests/test_apply_eligibility.py -v 2>&1 | tail -10"
 ```
 
 Expected: `ImportError: cannot import name 'classify_eligibility' ...`
@@ -325,8 +325,8 @@ def classify_eligibility(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any
 - [ ] **Step 4: Sync and re-run the tests (expect PASS)**
 
 ```bash
-rsync -av ~/dev/claude-memory/src/tools/backlog_apply.py slmbeast:~/dev/claude-memory/src/tools/backlog_apply.py
-ssh slmbeast "cd ~/dev/claude-memory && source venv/bin/activate && pytest tests/test_apply_eligibility.py -v 2>&1 | tail -10"
+rsync -av ~/dev/claude-memory/src/tools/backlog_apply.py ai-server:~/dev/claude-memory/src/tools/backlog_apply.py
+ssh ai-server "cd ~/dev/claude-memory && source venv/bin/activate && pytest tests/test_apply_eligibility.py -v 2>&1 | tail -10"
 ```
 
 Expected: 5 PASSED.
@@ -395,8 +395,8 @@ async def fetch_candidate_rows(
 - [ ] **Step 2: Sync and sanity-check that the import still works**
 
 ```bash
-rsync -av ~/dev/claude-memory/src/tools/backlog_apply.py slmbeast:~/dev/claude-memory/src/tools/backlog_apply.py
-ssh slmbeast "cd ~/dev/claude-memory && source venv/bin/activate && python -c 'from src.tools.backlog_apply import fetch_candidate_rows, classify_eligibility, _pick_canonical; print(\"ok\")'"
+rsync -av ~/dev/claude-memory/src/tools/backlog_apply.py ai-server:~/dev/claude-memory/src/tools/backlog_apply.py
+ssh ai-server "cd ~/dev/claude-memory && source venv/bin/activate && python -c 'from src.tools.backlog_apply import fetch_candidate_rows, classify_eligibility, _pick_canonical; print(\"ok\")'"
 ```
 
 Expected: `ok`.
@@ -609,9 +609,9 @@ import src.tools.backlog_apply  # noqa: E402, F401   # ← NEW
 - [ ] **Step 3: Sync and verify everything imports**
 
 ```bash
-rsync -av ~/dev/claude-memory/src/tools/backlog_apply.py slmbeast:~/dev/claude-memory/src/tools/backlog_apply.py
-rsync -av ~/dev/claude-memory/src/server.py slmbeast:~/dev/claude-memory/src/server.py
-ssh slmbeast "cd ~/dev/claude-memory && source venv/bin/activate && python -c 'import src.server; print(\"server import ok\")'"
+rsync -av ~/dev/claude-memory/src/tools/backlog_apply.py ai-server:~/dev/claude-memory/src/tools/backlog_apply.py
+rsync -av ~/dev/claude-memory/src/server.py ai-server:~/dev/claude-memory/src/server.py
+ssh ai-server "cd ~/dev/claude-memory && source venv/bin/activate && python -c 'import src.server; print(\"server import ok\")'"
 ```
 
 Expected: `server import ok`
@@ -619,7 +619,7 @@ Expected: `server import ok`
 - [ ] **Step 4: Run the full test suite to confirm no regressions**
 
 ```bash
-ssh slmbeast "cd ~/dev/claude-memory && source venv/bin/activate && pytest tests/ 2>&1 | tail -5"
+ssh ai-server "cd ~/dev/claude-memory && source venv/bin/activate && pytest tests/ 2>&1 | tail -5"
 ```
 
 Expected: all previous tests still pass + the 9 new ones (4 canonical + 5 eligibility) = 32 total.
@@ -640,9 +640,9 @@ git commit -m "feat(v5.2): add apply_backlog_batch MCP tool + register"
 - [ ] **Step 1: Copy files to EC2 + into the MCP container**
 
 ```bash
-scp -i ~/.ssh/AWS_FR.pem ~/dev/claude-memory/src/tools/backlog_apply.py ubuntu@44.212.169.119:~/claude-memory/src/tools/backlog_apply.py
-scp -i ~/.ssh/AWS_FR.pem ~/dev/claude-memory/src/server.py ubuntu@44.212.169.119:~/claude-memory/src/server.py
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@44.212.169.119 "docker cp ~/claude-memory/src/tools/backlog_apply.py claude_memory_mcp:/app/src/tools/backlog_apply.py && docker cp ~/claude-memory/src/server.py claude_memory_mcp:/app/src/server.py"
+scp -i ~/.ssh/your-key.pem ~/dev/claude-memory/src/tools/backlog_apply.py ubuntu@ec2.example.com:~/claude-memory/src/tools/backlog_apply.py
+scp -i ~/.ssh/your-key.pem ~/dev/claude-memory/src/server.py ubuntu@ec2.example.com:~/claude-memory/src/server.py
+ssh -i ~/.ssh/your-key.pem ubuntu@ec2.example.com "docker cp ~/claude-memory/src/tools/backlog_apply.py claude_memory_mcp:/app/src/tools/backlog_apply.py && docker cp ~/claude-memory/src/server.py claude_memory_mcp:/app/src/server.py"
 ```
 
 Expected: file transfers complete, no errors.
@@ -650,13 +650,13 @@ Expected: file transfers complete, no errors.
 - [ ] **Step 2: Rebuild the image and restart the container using the v1 ContainerConfig workaround (lesson #339)**
 
 ```bash
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@44.212.169.119 "cd ~/claude-memory && docker-compose build mcp 2>&1 | tail -5"
+ssh -i ~/.ssh/your-key.pem ubuntu@ec2.example.com "cd ~/claude-memory && docker-compose build mcp 2>&1 | tail -5"
 ```
 
 Expected: `Successfully tagged claude-memory_mcp:latest`, no errors.
 
 ```bash
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@44.212.169.119 "docker stop claude_memory_mcp && docker rm claude_memory_mcp && docker run -d --name claude_memory_mcp --network claude-memory_claude_memory_net -p 127.0.0.1:8004:8003 --env-file ~/claude-memory/.env -e DATABASE_URL=\"postgresql://claude:\$(grep POSTGRES_PASSWORD ~/claude-memory/.env | cut -d= -f2)@db:5432/claude_memory\" --restart unless-stopped claude-memory_mcp:latest && sleep 5 && docker ps --format '{{.Names}}: {{.Status}}' | grep claude"
+ssh -i ~/.ssh/your-key.pem ubuntu@ec2.example.com "docker stop claude_memory_mcp && docker rm claude_memory_mcp && docker run -d --name claude_memory_mcp --network claude-memory_claude_memory_net -p 127.0.0.1:8004:8003 --env-file ~/claude-memory/.env -e DATABASE_URL=\"postgresql://claude:\$(grep POSTGRES_PASSWORD ~/claude-memory/.env | cut -d= -f2)@db:5432/claude_memory\" --restart unless-stopped claude-memory_mcp:latest && sleep 5 && docker ps --format '{{.Names}}: {{.Status}}' | grep claude"
 ```
 
 Expected: container id echoed; `claude_memory_mcp: Up 5 seconds` in output.
@@ -664,7 +664,7 @@ Expected: container id echoed; `claude_memory_mcp: Up 5 seconds` in output.
 - [ ] **Step 3: Verify container health**
 
 ```bash
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@44.212.169.119 "docker logs claude_memory_mcp --tail 20 2>&1 | grep -iE 'startup|error|traceback' | head -10"
+ssh -i ~/.ssh/your-key.pem ubuntu@ec2.example.com "docker logs claude_memory_mcp --tail 20 2>&1 | grep -iE 'startup|error|traceback' | head -10"
 ```
 
 Expected: `Application startup complete.` line; zero errors/tracebacks.
@@ -725,7 +725,7 @@ Expected response:
 - [ ] **Step 2: Spot-check 5 random resulting merges**
 
 ```bash
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@44.212.169.119 "docker exec claude_memory_db psql -U claude -d claude_memory -c \"
+ssh -i ~/.ssh/your-key.pem ubuntu@ec2.example.com "docker exec claude_memory_db psql -U claude -d claude_memory -c \"
 SELECT lm.id, lm.canonical_id, lm.merged_id, lm.action, lm.auto_decided, lm.decided_by,
        lc.title AS canonical_title,
        lm_merged.title AS merged_title,
@@ -777,7 +777,7 @@ Expected: `would_apply: 0`, `would_skip: ≈82` (all skipped as `already_merged`
 - [ ] **Step 3: Final audit count**
 
 ```bash
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@44.212.169.119 "docker exec claude_memory_db psql -U claude -d claude_memory -c \"
+ssh -i ~/.ssh/your-key.pem ubuntu@ec2.example.com "docker exec claude_memory_db psql -U claude -d claude_memory -c \"
 SELECT COUNT(*) AS total_applied,
        SUM(CASE WHEN action='merged' THEN 1 ELSE 0 END) AS duplicates,
        SUM(CASE WHEN action='superseded' THEN 1 ELSE 0 END) AS supersedes

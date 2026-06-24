@@ -9,7 +9,7 @@
 
 v6 introduces **agent attribution** to the claude-memory MCP server so multiple agent families (Claude, Codex, and any future additions) can share the same corpus without silently overwriting each other or polluting consolidation. Every write to the corpus is stamped with a `source_agent` (family-level) and `source_client_id` (raw OAuth/API-key identifier). Write tools enforce a **rule-b ownership model** for owned content (only the original author can modify) while leaving shared project metadata as last-writer-wins. The v5 log-time consolidation pipeline gains a **cross-agent skip** so auto-merges and supersedes never cross family boundaries.
 
-Codex is onboarded via a new `api_keys` table that stores hashed bearer tokens with per-client revocation, family classification, and labels. The existing legacy `API_KEY` env-var path is replaced by per-machine `api_keys` rows for Brian's Claude fleet (Mac Studio Claude Desktop, Claude Code, slmbeast, work laptop, etc.), giving per-machine revocation and audit. OAuth DCR continues to function for any client that prefers it.
+Codex is onboarded via a new `api_keys` table that stores hashed bearer tokens with per-client revocation, family classification, and labels. The existing legacy `API_KEY` env-var path is replaced by per-machine `api_keys` rows for Brian's Claude fleet (Workstation Claude Desktop, Claude Code, ai-server, laptop, etc.), giving per-machine revocation and audit. OAuth DCR continues to function for any client that prefers it.
 
 The v6 scope is intentionally narrow: attribution, write enforcement, consolidation skip, and the auth/onboarding plumbing required to make Codex a first-class client. Cross-agent merge investigation, per-agent UI surfaces, and per-machine reporting dashboards are out of scope.
 
@@ -78,8 +78,8 @@ CREATE INDEX idx_api_keys_active ON api_keys (revoked_at) WHERE revoked_at IS NU
 
 - `api_key_hash`: sha256 hex of the raw bearer. Plaintext bearer is shown to the operator once at creation and never stored.
 - `family`: enum-like string. Today: `'claude'`, `'codex'`. Future additions append.
-- `client_name`: optional, free-form (e.g., `'codex-cli'`, `'claude-desktop-mac-studio'`). Used for logs.
-- `label`: human-readable description for `list_api_keys` output and operator memory (e.g., `'Brian Codex laptop'`, `'Brian Claude slmbeast'`).
+- `client_name`: optional, free-form (e.g., `'codex-cli'`, `'claude-desktop-workstation'`). Used for logs.
+- `label`: human-readable description for `list_api_keys` output and operator memory (e.g., `'Brian Codex laptop'`, `'Brian Claude ai-server'`).
 - `scopes`: simple array. Today: `['read','write']` for regular tokens, `['read','write','admin']` for admin tokens. Future scopes may be added without migration.
 - `last_seen_at`: updated on every authenticated request that uses this key. Used to identify dormant tokens for cleanup.
 - `revoked_at`: soft-delete. Revoked rows remain for audit but are not accepted for auth.
@@ -306,7 +306,7 @@ Suggested env var name: CODEX_MEMORY_TOKEN
 3. Operator adds to Codex config:
    ```toml
    [mcp_servers.claude-memory]
-   url = "https://memory.friendly-robots.com/mcp"
+   url = "https://memory.example.com/mcp"
    bearer_token_env_var = "CODEX_MEMORY_TOKEN"
    ```
 4. Codex starts working. Identity resolver classifies it as `family='codex'`. First write triggers no consolidation candidates (Codex has zero prior lessons). Search returns all of Claude's existing context.
@@ -323,8 +323,8 @@ For each machine across the fleet:
 4. Verify connectivity (a search call against the MCP server) before deleting the old config.
 
 Machines in scope (confirmed by operator):
-- Mac Studio (shared token for Claude Desktop + Claude Code)
-- slmbeast (Claude Code)
+- Workstation (shared token for Claude Desktop + Claude Code)
+- ai-server (Claude Code)
 - Work laptop (Claude Code)
 - Any other machine the operator identifies during rollout
 
@@ -389,7 +389,7 @@ These are decided during the implementation plan, not the design:
 1. **Does `lesson_ratings` exist as a separate table or are ratings counters on `lessons`?** Determines whether ratings need their own `source_agent` column.
 2. **Does `project_state` have a history table (`project_state_history` from v2)?** Determines whether Pattern 3 writes a new row or updates in place.
 3. **Exact mechanism for stamping per-request identity in FastMCP's `Context`.** Either a lifespan-scoped per-request dict or attaching to `request_context` directly. Verified against FastMCP source during Task 2.
-4. **`mcp-remote` env-var substitution.** Whether `mcp-remote` accepts `${VAR}` syntax in `--header` arguments, or if a shell wrapper is needed for the Claude per-machine migration. Resolved during Step 9 by testing both paths on Mac Studio first.
+4. **`mcp-remote` env-var substitution.** Whether `mcp-remote` accepts `${VAR}` syntax in `--header` arguments, or if a shell wrapper is needed for the Claude per-machine migration. Resolved during Step 9 by testing both paths on Workstation first.
 
 ## Success Criteria
 

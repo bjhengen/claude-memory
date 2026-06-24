@@ -10,7 +10,7 @@ Usage in claude_desktop_config.json:
   "mcpServers": {
     "claude-memory": {
       "command": "python3",
-      "args": ["/Users/bhengen/dev/claude-memory/scripts/mcp-bridge.py"]
+      "args": ["/path/to/claude-memory/scripts/mcp-bridge.py"]
     }
   }
 }
@@ -23,7 +23,7 @@ from mcp.client.sse import sse_client
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
-MCP_URL = "https://memory.friendly-robots.com/mcp"
+MCP_URL = os.getenv("MCP_URL", "https://memory.example.com/mcp")
 
 
 async def main():

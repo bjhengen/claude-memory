@@ -10,7 +10,7 @@
 
 **Design doc:** `docs/plans/2026-04-20-v5-1-backlog-analysis-design.md`
 
-**Dev environment:** same slmbeast test-DB workflow as v5 (rsync to `slmbeast:~/dev/claude-memory/`, run tests via `ssh slmbeast 'cd ~/dev/claude-memory && source venv/bin/activate && pytest ...'`). Test DB at `postgresql://claude:claude@slmbeast:5434/claude_memory_test` already has the v5 schema applied.
+**Dev environment:** same ai-server test-DB workflow as v5 (rsync to `ai-server:~/dev/claude-memory/`, run tests via `ssh ai-server 'cd ~/dev/claude-memory && source venv/bin/activate && pytest ...'`). Test DB at `postgresql://claude:claude@ai-server:5434/claude_memory_test` already has the v5 schema applied.
 
 **Branching:** All work on a new feature branch `v5-1-backlog-analysis`, merged fast-forward to main at completion.
 
@@ -63,12 +63,12 @@ CREATE INDEX IF NOT EXISTS idx_backlog_analysis_verdict
     ON backlog_analysis(verdict, confidence DESC);
 ```
 
-- [ ] **Step 3: Apply migration to the slmbeast test DB**
+- [ ] **Step 3: Apply migration to the ai-server test DB**
 
 Run:
 ```bash
-rsync -av ~/dev/claude-memory/db/migrations/v5_1_backlog_analysis.sql slmbeast:~/dev/claude-memory/db/migrations/v5_1_backlog_analysis.sql
-ssh slmbeast "docker cp ~/dev/claude-memory/db/migrations/v5_1_backlog_analysis.sql claude_memory_test_db:/tmp/v5_1.sql && docker exec claude_memory_test_db psql -U claude -d claude_memory_test -f /tmp/v5_1.sql"
+rsync -av ~/dev/claude-memory/db/migrations/v5_1_backlog_analysis.sql ai-server:~/dev/claude-memory/db/migrations/v5_1_backlog_analysis.sql
+ssh ai-server "docker cp ~/dev/claude-memory/db/migrations/v5_1_backlog_analysis.sql claude_memory_test_db:/tmp/v5_1.sql && docker exec claude_memory_test_db psql -U claude -d claude_memory_test -f /tmp/v5_1.sql"
 ```
 
 Expected: `CREATE TABLE` + two `CREATE INDEX` messages, no errors.
@@ -77,7 +77,7 @@ Expected: `CREATE TABLE` + two `CREATE INDEX` messages, no errors.
 
 Run:
 ```bash
-ssh slmbeast "docker exec claude_memory_test_db psql -U claude -d claude_memory_test -c '\d backlog_analysis'"
+ssh ai-server "docker exec claude_memory_test_db psql -U claude -d claude_memory_test -c '\d backlog_analysis'"
 ```
 
 Expected: table schema printed showing all 11 columns.
@@ -152,11 +152,11 @@ async def test_generate_pairs_returns_only_above_threshold(db_pool):
         assert p["lesson_a_id"] < p["lesson_b_id"]
 ```
 
-- [ ] **Step 2: Sync to slmbeast and run the test (expect FAIL)**
+- [ ] **Step 2: Sync to ai-server and run the test (expect FAIL)**
 
 ```bash
-rsync -av ~/dev/claude-memory/tests/test_backlog_pairs.py slmbeast:~/dev/claude-memory/tests/test_backlog_pairs.py
-ssh slmbeast "cd ~/dev/claude-memory && source venv/bin/activate && pytest tests/test_backlog_pairs.py -v"
+rsync -av ~/dev/claude-memory/tests/test_backlog_pairs.py ai-server:~/dev/claude-memory/tests/test_backlog_pairs.py
+ssh ai-server "cd ~/dev/claude-memory && source venv/bin/activate && pytest tests/test_backlog_pairs.py -v"
 ```
 
 Expected: 1 FAILED with ImportError — `src.consolidation.backlog` doesn't exist yet.
@@ -207,8 +207,8 @@ async def generate_pairs(
 - [ ] **Step 4: Sync and re-run the test (expect PASS)**
 
 ```bash
-rsync -av ~/dev/claude-memory/src/consolidation/backlog.py slmbeast:~/dev/claude-memory/src/consolidation/backlog.py
-ssh slmbeast "cd ~/dev/claude-memory && source venv/bin/activate && pytest tests/test_backlog_pairs.py -v"
+rsync -av ~/dev/claude-memory/src/consolidation/backlog.py ai-server:~/dev/claude-memory/src/consolidation/backlog.py
+ssh ai-server "cd ~/dev/claude-memory && source venv/bin/activate && pytest tests/test_backlog_pairs.py -v"
 ```
 
 Expected: 1 PASSED.
@@ -287,8 +287,8 @@ async def judge_and_record(
 - [ ] **Step 2: Sync and verify import**
 
 ```bash
-rsync -av ~/dev/claude-memory/src/consolidation/backlog.py slmbeast:~/dev/claude-memory/src/consolidation/backlog.py
-ssh slmbeast "cd ~/dev/claude-memory && source venv/bin/activate && python -c 'from src.consolidation.backlog import judge_and_record; print(\"ok\")'"
+rsync -av ~/dev/claude-memory/src/consolidation/backlog.py ai-server:~/dev/claude-memory/src/consolidation/backlog.py
+ssh ai-server "cd ~/dev/claude-memory && source venv/bin/activate && python -c 'from src.consolidation.backlog import judge_and_record; print(\"ok\")'"
 ```
 
 Expected: `ok`
@@ -398,8 +398,8 @@ def test_render_report_markdown_contains_key_sections():
 - [ ] **Step 2: Sync and run the test (expect FAIL)**
 
 ```bash
-rsync -av ~/dev/claude-memory/tests/test_backlog_report.py slmbeast:~/dev/claude-memory/tests/test_backlog_report.py
-ssh slmbeast "cd ~/dev/claude-memory && source venv/bin/activate && pytest tests/test_backlog_report.py -v"
+rsync -av ~/dev/claude-memory/tests/test_backlog_report.py ai-server:~/dev/claude-memory/tests/test_backlog_report.py
+ssh ai-server "cd ~/dev/claude-memory && source venv/bin/activate && pytest tests/test_backlog_report.py -v"
 ```
 
 Expected: 3 FAILED with ImportError — `render_report` doesn't exist.
@@ -534,8 +534,8 @@ def render_report(rows: list[dict[str, Any]], thresholds) -> tuple[str, dict[str
 - [ ] **Step 4: Sync and re-run the test (expect PASS)**
 
 ```bash
-rsync -av ~/dev/claude-memory/src/consolidation/backlog.py slmbeast:~/dev/claude-memory/src/consolidation/backlog.py
-ssh slmbeast "cd ~/dev/claude-memory && source venv/bin/activate && pytest tests/test_backlog_report.py -v"
+rsync -av ~/dev/claude-memory/src/consolidation/backlog.py ai-server:~/dev/claude-memory/src/consolidation/backlog.py
+ssh ai-server "cd ~/dev/claude-memory && source venv/bin/activate && pytest tests/test_backlog_report.py -v"
 ```
 
 Expected: 3 PASSED.
@@ -543,7 +543,7 @@ Expected: 3 PASSED.
 - [ ] **Step 5: Run all tests to confirm no regressions**
 
 ```bash
-ssh slmbeast "cd ~/dev/claude-memory && source venv/bin/activate && pytest tests/ -v 2>&1 | tail -20"
+ssh ai-server "cd ~/dev/claude-memory && source venv/bin/activate && pytest tests/ -v 2>&1 | tail -20"
 ```
 
 Expected: all prior tests still pass; the two new tests (pairs, report) also pass. Total 23+ passed.
@@ -699,11 +699,11 @@ if __name__ == "__main__":
     sys.exit(asyncio.run(main()))
 ```
 
-- [ ] **Step 2: Sync and verify it imports and runs --dry-run against slmbeast test DB**
+- [ ] **Step 2: Sync and verify it imports and runs --dry-run against ai-server test DB**
 
 ```bash
-rsync -av ~/dev/claude-memory/scripts/analyze_backlog.py slmbeast:~/dev/claude-memory/scripts/analyze_backlog.py
-ssh slmbeast "cd ~/dev/claude-memory && source venv/bin/activate && PYTHONPATH=/home/bhengen/dev/claude-memory DATABASE_URL=postgresql://claude:claude@localhost:5434/claude_memory_test python -m scripts.analyze_backlog --batch-id test-dryrun --dry-run"
+rsync -av ~/dev/claude-memory/scripts/analyze_backlog.py ai-server:~/dev/claude-memory/scripts/analyze_backlog.py
+ssh ai-server "cd ~/dev/claude-memory && source venv/bin/activate && PYTHONPATH=/home/you/dev/claude-memory DATABASE_URL=postgresql://claude:claude@localhost:5434/claude_memory_test python -m scripts.analyze_backlog --batch-id test-dryrun --dry-run"
 ```
 
 Expected: logs show total pair count for the test DB's lessons (small number — test DB has <10 rows), logs "DRY RUN — no Anthropic calls will be made", exit code 0.
@@ -721,13 +721,13 @@ git commit -m "feat(v5.1): add analyze_backlog.py CLI script"
 
 **Files:** none
 
-Run the analyzer for real (small scale) on the slmbeast test DB to exercise the full pipeline before pointing it at prod.
+Run the analyzer for real (small scale) on the ai-server test DB to exercise the full pipeline before pointing it at prod.
 
 - [ ] **Step 1: Seed two near-duplicate lessons in the test DB**
 
 ```bash
-ssh slmbeast "docker exec claude_memory_test_db psql -U claude -d claude_memory_test -c \"DELETE FROM lessons WHERE title LIKE 'V51%';\""
-ssh slmbeast "docker exec claude_memory_test_db psql -U claude -d claude_memory_test -c \"
+ssh ai-server "docker exec claude_memory_test_db psql -U claude -d claude_memory_test -c \"DELETE FROM lessons WHERE title LIKE 'V51%';\""
+ssh ai-server "docker exec claude_memory_test_db psql -U claude -d claude_memory_test -c \"
 INSERT INTO lessons (title, content, embedding) VALUES
   ('V51_A', 'iOS share sheet requires sharePositionOrigin on all iOS devices.',
    ('[' || (SELECT string_agg('0.12', ',') FROM generate_series(1,1536)) || ']')::vector(1536)),
@@ -746,7 +746,7 @@ Supply your Anthropic API key via the local shell; it's then forwarded via the s
 
 ```bash
 export ANTHROPIC_API_KEY="sk-ant-..."  # supply the key once, in local shell
-ssh slmbeast "cd ~/dev/claude-memory && source venv/bin/activate && PYTHONPATH=/home/bhengen/dev/claude-memory DATABASE_URL=postgresql://claude:claude@localhost:5434/claude_memory_test ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY python -m scripts.analyze_backlog --batch-id smoke-v51 --limit 5"
+ssh ai-server "cd ~/dev/claude-memory && source venv/bin/activate && PYTHONPATH=/home/you/dev/claude-memory DATABASE_URL=postgresql://claude:claude@localhost:5434/claude_memory_test ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY python -m scripts.analyze_backlog --batch-id smoke-v51 --limit 5"
 ```
 
 Expected output: at least 1 pair processed (V51_A × V51_B), log line showing verdict and cosine.
@@ -754,7 +754,7 @@ Expected output: at least 1 pair processed (V51_A × V51_B), log line showing ve
 Acceptance: query the test DB afterward —
 
 ```bash
-ssh slmbeast "docker exec claude_memory_test_db psql -U claude -d claude_memory_test -c 'SELECT batch_run_id, lesson_a_id, lesson_b_id, verdict, confidence FROM backlog_analysis ORDER BY id DESC LIMIT 5;'"
+ssh ai-server "docker exec claude_memory_test_db psql -U claude -d claude_memory_test -c 'SELECT batch_run_id, lesson_a_id, lesson_b_id, verdict, confidence FROM backlog_analysis ORDER BY id DESC LIMIT 5;'"
 ```
 
 Expected: one row, verdict=duplicate, confidence in [0.85, 1.00].
@@ -870,8 +870,8 @@ if __name__ == "__main__":
 - [ ] **Step 2: Sync and exercise it against the test DB's smoke batch**
 
 ```bash
-rsync -av ~/dev/claude-memory/scripts/backlog_report.py slmbeast:~/dev/claude-memory/scripts/backlog_report.py
-ssh slmbeast "cd ~/dev/claude-memory && source venv/bin/activate && PYTHONPATH=/home/bhengen/dev/claude-memory DATABASE_URL=postgresql://claude:claude@localhost:5434/claude_memory_test python -m scripts.backlog_report --batch-id smoke-v51"
+rsync -av ~/dev/claude-memory/scripts/backlog_report.py ai-server:~/dev/claude-memory/scripts/backlog_report.py
+ssh ai-server "cd ~/dev/claude-memory && source venv/bin/activate && PYTHONPATH=/home/you/dev/claude-memory DATABASE_URL=postgresql://claude:claude@localhost:5434/claude_memory_test python -m scripts.backlog_report --batch-id smoke-v51"
 ```
 
 Expected: a small markdown report showing 1 pair total, 1 duplicate, 1 auto_merge in threshold crossings.
@@ -892,7 +892,7 @@ git commit -m "feat(v5.1): add backlog_report.py CLI script"
 - [ ] **Step 1: Copy the migration file to EC2**
 
 ```bash
-scp -i ~/.ssh/AWS_FR.pem ~/dev/claude-memory/db/migrations/v5_1_backlog_analysis.sql ubuntu@44.212.169.119:~/claude-memory/db/migrations/v5_1_backlog_analysis.sql
+scp -i ~/.ssh/your-key.pem ~/dev/claude-memory/db/migrations/v5_1_backlog_analysis.sql ubuntu@ec2.example.com:~/claude-memory/db/migrations/v5_1_backlog_analysis.sql
 ```
 
 Expected: file transferred, no errors.
@@ -900,7 +900,7 @@ Expected: file transferred, no errors.
 - [ ] **Step 2: Apply to the prod DB**
 
 ```bash
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@44.212.169.119 "docker cp ~/claude-memory/db/migrations/v5_1_backlog_analysis.sql claude_memory_db:/tmp/v5_1.sql && docker exec claude_memory_db psql -U claude -d claude_memory -f /tmp/v5_1.sql"
+ssh -i ~/.ssh/your-key.pem ubuntu@ec2.example.com "docker cp ~/claude-memory/db/migrations/v5_1_backlog_analysis.sql claude_memory_db:/tmp/v5_1.sql && docker exec claude_memory_db psql -U claude -d claude_memory -f /tmp/v5_1.sql"
 ```
 
 Expected: `CREATE TABLE` + 2 `CREATE INDEX` messages, no errors.
@@ -908,7 +908,7 @@ Expected: `CREATE TABLE` + 2 `CREATE INDEX` messages, no errors.
 - [ ] **Step 3: Verify table exists in prod**
 
 ```bash
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@44.212.169.119 "docker exec claude_memory_db psql -U claude -d claude_memory -c '\d backlog_analysis'"
+ssh -i ~/.ssh/your-key.pem ubuntu@ec2.example.com "docker exec claude_memory_db psql -U claude -d claude_memory -c '\d backlog_analysis'"
 ```
 
 Expected: full schema of the new table.
@@ -924,8 +924,8 @@ Expected: full schema of the new table.
 - [ ] **Step 1: Copy the source code onto EC2 (needed for the script to run there)**
 
 ```bash
-scp -i ~/.ssh/AWS_FR.pem ~/dev/claude-memory/src/consolidation/backlog.py ubuntu@44.212.169.119:~/claude-memory/src/consolidation/backlog.py
-scp -i ~/.ssh/AWS_FR.pem -r ~/dev/claude-memory/scripts ubuntu@44.212.169.119:~/claude-memory/
+scp -i ~/.ssh/your-key.pem ~/dev/claude-memory/src/consolidation/backlog.py ubuntu@ec2.example.com:~/claude-memory/src/consolidation/backlog.py
+scp -i ~/.ssh/your-key.pem -r ~/dev/claude-memory/scripts ubuntu@ec2.example.com:~/claude-memory/
 ```
 
 Expected: files transferred.
@@ -935,7 +935,7 @@ Expected: files transferred.
 The `claude_memory_mcp` container already has the Python environment, anthropic SDK, and DB connectivity. Easiest to run the script there.
 
 ```bash
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@44.212.169.119 "docker cp ~/claude-memory/src/consolidation/backlog.py claude_memory_mcp:/app/src/consolidation/backlog.py && docker cp ~/claude-memory/scripts claude_memory_mcp:/app/scripts && docker exec claude_memory_mcp python -m scripts.analyze_backlog --batch-id pilot-2026-04-21 --dry-run"
+ssh -i ~/.ssh/your-key.pem ubuntu@ec2.example.com "docker cp ~/claude-memory/src/consolidation/backlog.py claude_memory_mcp:/app/src/consolidation/backlog.py && docker cp ~/claude-memory/scripts claude_memory_mcp:/app/scripts && docker exec claude_memory_mcp python -m scripts.analyze_backlog --batch-id pilot-2026-04-21 --dry-run"
 ```
 
 Expected log lines:
@@ -963,7 +963,7 @@ If N is much larger (e.g., >5000), re-run with a tighter `--cosine-threshold 0.8
 - [ ] **Step 1: Run 50 pairs**
 
 ```bash
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@44.212.169.119 "docker exec claude_memory_mcp python -m scripts.analyze_backlog --batch-id pilot-2026-04-21 --limit 50"
+ssh -i ~/.ssh/your-key.pem ubuntu@ec2.example.com "docker exec claude_memory_mcp python -m scripts.analyze_backlog --batch-id pilot-2026-04-21 --limit 50"
 ```
 
 Expected: progress log lines every 25 pairs; total 50 pairs judged; exit code 0. Should take ~1 minute at concurrency=10.
@@ -971,7 +971,7 @@ Expected: progress log lines every 25 pairs; total 50 pairs judged; exit code 0.
 - [ ] **Step 2: Sanity-check the rows that were written**
 
 ```bash
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@44.212.169.119 "docker exec claude_memory_db psql -U claude -d claude_memory -c \"SELECT verdict, COUNT(*), ROUND(AVG(confidence), 2) AS avg_conf FROM backlog_analysis WHERE batch_run_id='pilot-2026-04-21' GROUP BY verdict;\""
+ssh -i ~/.ssh/your-key.pem ubuntu@ec2.example.com "docker exec claude_memory_db psql -U claude -d claude_memory -c \"SELECT verdict, COUNT(*), ROUND(AVG(confidence), 2) AS avg_conf FROM backlog_analysis WHERE batch_run_id='pilot-2026-04-21' GROUP BY verdict;\""
 ```
 
 Expected: 4 rows (one per verdict; some may have count=0 — that's fine). No rows where `confidence=0.0` (would indicate judge errors on every call — smell test).
@@ -981,7 +981,7 @@ If `confidence=0.0` rows appear, investigate before the full run (check `ANTHROP
 - [ ] **Step 3: Hand-inspect the top 5 pairs by confidence**
 
 ```bash
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@44.212.169.119 "docker exec claude_memory_db psql -U claude -d claude_memory -c \"SELECT ba.lesson_a_id, ba.lesson_b_id, ba.verdict, ba.confidence, ba.reasoning, la.title AS a_title, lb.title AS b_title FROM backlog_analysis ba JOIN lessons la ON la.id=ba.lesson_a_id JOIN lessons lb ON lb.id=ba.lesson_b_id WHERE ba.batch_run_id='pilot-2026-04-21' ORDER BY ba.confidence DESC LIMIT 5;\""
+ssh -i ~/.ssh/your-key.pem ubuntu@ec2.example.com "docker exec claude_memory_db psql -U claude -d claude_memory -c \"SELECT ba.lesson_a_id, ba.lesson_b_id, ba.verdict, ba.confidence, ba.reasoning, la.title AS a_title, lb.title AS b_title FROM backlog_analysis ba JOIN lessons la ON la.id=ba.lesson_a_id JOIN lessons lb ON lb.id=ba.lesson_b_id WHERE ba.batch_run_id='pilot-2026-04-21' ORDER BY ba.confidence DESC LIMIT 5;\""
 ```
 
 Acceptance: each of the top 5 either has a sensible `reasoning` string or the titles/contents clearly justify the verdict. If any of the top-5 reasoning strings are nonsensical, pause and investigate the judge behavior before committing to the full run.
@@ -997,7 +997,7 @@ Acceptance: each of the top 5 either has a sensible `reasoning` string or the ti
 - [ ] **Step 1: Resume the batch to completion**
 
 ```bash
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@44.212.169.119 "docker exec claude_memory_mcp python -m scripts.analyze_backlog --batch-id pilot-2026-04-21"
+ssh -i ~/.ssh/your-key.pem ubuntu@ec2.example.com "docker exec claude_memory_mcp python -m scripts.analyze_backlog --batch-id pilot-2026-04-21"
 ```
 
 Expected: resume logs show 50 already judged; remaining N-50 are processed. Total runtime in the 2–7 minute range for N≈500–2000. Exit code 0.
@@ -1005,7 +1005,7 @@ Expected: resume logs show 50 already judged; remaining N-50 are processed. Tota
 - [ ] **Step 2: Generate the report**
 
 ```bash
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@44.212.169.119 "docker exec claude_memory_mcp python -m scripts.backlog_report --batch-id pilot-2026-04-21 --format both" > /tmp/pilot-2026-04-21-report.md
+ssh -i ~/.ssh/your-key.pem ubuntu@ec2.example.com "docker exec claude_memory_mcp python -m scripts.backlog_report --batch-id pilot-2026-04-21 --format both" > /tmp/pilot-2026-04-21-report.md
 cat /tmp/pilot-2026-04-21-report.md | head -50
 ```
 
@@ -1014,7 +1014,7 @@ Expected: markdown report printed to the file, first 50 lines show verdict distr
 - [ ] **Step 3: Also dump JSON for later analysis**
 
 ```bash
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@44.212.169.119 "docker exec claude_memory_mcp python -m scripts.backlog_report --batch-id pilot-2026-04-21 --format json" > /tmp/pilot-2026-04-21-report.json
+ssh -i ~/.ssh/your-key.pem ubuntu@ec2.example.com "docker exec claude_memory_mcp python -m scripts.backlog_report --batch-id pilot-2026-04-21 --format json" > /tmp/pilot-2026-04-21-report.json
 wc -l /tmp/pilot-2026-04-21-report.json
 ```
 
@@ -1031,7 +1031,7 @@ Expected: a multi-line JSON document.
 - [ ] **Step 1: Verify all tests pass on feature branch**
 
 ```bash
-ssh slmbeast "cd ~/dev/claude-memory && source venv/bin/activate && pytest tests/ 2>&1 | tail -5"
+ssh ai-server "cd ~/dev/claude-memory && source venv/bin/activate && pytest tests/ 2>&1 | tail -5"
 ```
 
 Expected: all tests pass (previous 19 + 4 new ones from Tasks 2 and 4 = 23 total).

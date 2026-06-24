@@ -89,7 +89,7 @@ python scripts/seed_data.py
 
 ```bash
 # On the server, against the prod DB
-python scripts/issue_api_key.py --label "Mac Studio" --client-name claude-code --family claude
+python scripts/issue_api_key.py --label "Workstation" --client-name claude-code --family claude
 python scripts/list_api_keys.py
 ```
 

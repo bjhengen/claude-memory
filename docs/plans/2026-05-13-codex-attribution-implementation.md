@@ -10,7 +10,7 @@
 
 **Pre-flight:**
 
-- The test DB container (`claude_memory_test_db` on slmbeast, port 5434) is currently stopped. Start it: `ssh slmbeast 'docker start claude_memory_test_db'`.
+- The test DB container (`claude_memory_test_db` on ai-server, port 5434) is currently stopped. Start it: `ssh ai-server 'docker start claude_memory_test_db'`.
 - The test DB must have **all prior migrations** applied: `001_add_journal.sql`, `v4_feedback_loop.sql`, `v5_consolidation.sql`, `v5_1_backlog_analysis.sql`, `v5_oauth_persistence.sql`. Tasks below verify this with the schema-introspection test and the seed-row tests.
 - **Subagent caveat:** the plan cites file:line locations as hints, but mechanical edits earlier in a file may shift downstream line numbers. Subagents should `grep` for the surrounding SQL/function name when applying edits, not rely on the exact line numbers as written.
 
@@ -61,7 +61,7 @@
 - [ ] **Step 1: Start the test DB**
 
 ```bash
-ssh slmbeast 'docker start claude_memory_test_db'
+ssh ai-server 'docker start claude_memory_test_db'
 sleep 3
 PGPASSWORD=claude psql -h localhost -p 5434 -U claude -d claude_memory_test -c "SELECT 1"
 ```
@@ -2943,7 +2943,7 @@ git commit -m "feat(v6): list_clients admin MCP tool"
 - [ ] **Step 1: Run the entire test suite**
 
 ```bash
-ssh slmbeast 'docker start claude_memory_test_db' 2>/dev/null || true
+ssh ai-server 'docker start claude_memory_test_db' 2>/dev/null || true
 sleep 2
 pytest tests/ -v
 ```
@@ -2995,7 +2995,7 @@ git commit -m "fix(v6): test-suite green after attribution rollout" || echo "not
 - [ ] **Step 1: Back up prod DB**
 
 ```bash
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@ec2-44-212-169-119.compute-1.amazonaws.com \
+ssh -i ~/.ssh/your-key.pem ubuntu@ec2.example.com \
     "cd ~/claude-memory && docker exec claude_memory_db pg_dump -U claude claude_memory > backup_pre_v6.sql && ls -la backup_pre_v6.sql"
 ```
 
@@ -3004,9 +3004,9 @@ Confirm backup file exists and is non-trivial size.
 - [ ] **Step 2: Apply migration to prod**
 
 ```bash
-scp -i ~/.ssh/AWS_FR.pem db/migrations/v6_attribution.sql \
-    ubuntu@ec2-44-212-169-119.compute-1.amazonaws.com:~/claude-memory/db/migrations/
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@ec2-44-212-169-119.compute-1.amazonaws.com \
+scp -i ~/.ssh/your-key.pem db/migrations/v6_attribution.sql \
+    ubuntu@ec2.example.com:~/claude-memory/db/migrations/
+ssh -i ~/.ssh/your-key.pem ubuntu@ec2.example.com \
     "cd ~/claude-memory && docker exec -i claude_memory_db psql -U claude -d claude_memory < db/migrations/v6_attribution.sql"
 ```
 
@@ -3015,10 +3015,10 @@ Expected: ALTER/CREATE confirmations, COMMIT at end.
 - [ ] **Step 3: Deploy new server build**
 
 ```bash
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@ec2-44-212-169-119.compute-1.amazonaws.com \
+ssh -i ~/.ssh/your-key.pem ubuntu@ec2.example.com \
     "cd ~/claude-memory && git pull && docker-compose up -d --build"
 sleep 5
-curl https://memory.friendly-robots.com/health
+curl https://memory.example.com/health
 ```
 
 Expected: healthy. Tail logs for any startup errors.
@@ -3026,7 +3026,7 @@ Expected: healthy. Tail logs for any startup errors.
 - [ ] **Step 4: Issue Codex prod token**
 
 ```bash
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@ec2-44-212-169-119.compute-1.amazonaws.com \
+ssh -i ~/.ssh/your-key.pem ubuntu@ec2.example.com \
     "cd ~/claude-memory && docker exec -i claude_memory_mcp \
      env DATABASE_URL='postgresql://claude:claude@db:5432/claude_memory' \
      python scripts/issue_api_key.py \
@@ -3043,7 +3043,7 @@ Configure Codex MCP TOML:
 
 ```toml
 [mcp_servers.claude-memory]
-url = "https://memory.friendly-robots.com/mcp"
+url = "https://memory.example.com/mcp"
 bearer_token_env_var = "CODEX_MEMORY_TOKEN"
 ```
 
@@ -3051,10 +3051,10 @@ Smoke-test: have Codex call `search()` and verify a response.
 
 - [ ] **Step 5: Issue per-machine Claude tokens**
 
-For each machine (Mac Studio, slmbeast, work laptop):
+For each machine (Workstation, ai-server, laptop):
 
 ```bash
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@ec2-44-212-169-119.compute-1.amazonaws.com \
+ssh -i ~/.ssh/your-key.pem ubuntu@ec2.example.com \
     "docker exec -i claude_memory_mcp \
      env DATABASE_URL='postgresql://claude:claude@db:5432/claude_memory' \
      python scripts/issue_api_key.py \
@@ -3070,7 +3070,7 @@ For each machine: set `CLAUDE_MEMORY_TOKEN=<that machine's bearer>` in shell env
       "command": "sh",
       "args": [
         "-c",
-        "npx -y mcp-remote@latest https://memory.friendly-robots.com/mcp --header \"Authorization:Bearer $CLAUDE_MEMORY_TOKEN\""
+        "npx -y mcp-remote@latest https://memory.example.com/mcp --header \"Authorization:Bearer $CLAUDE_MEMORY_TOKEN\""
       ]
     }
   }
@@ -3084,7 +3084,7 @@ Test connectivity (a single `search()` call) from each machine before deleting t
 - [ ] **Step 6: Monitor**
 
 ```bash
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@ec2-44-212-169-119.compute-1.amazonaws.com \
+ssh -i ~/.ssh/your-key.pem ubuntu@ec2.example.com \
     "docker logs claude_memory_mcp --since 24h 2>&1 | grep DEPRECATION | wc -l"
 ```
 

@@ -190,7 +190,7 @@ No test for the MCP tool registration or the full tool call path — same conven
 
 Five steps:
 
-1. **Implement + test on slmbeast** — same rsync-to-slmbeast / pytest-via-SSH loop as v5/v5.1. Apply migration-free (no DB changes this iteration).
+1. **Implement + test on ai-server** — same rsync-to-ai-server / pytest-via-SSH loop as v5/v5.1. Apply migration-free (no DB changes this iteration).
 2. **Deploy to prod** — scp new `src/tools/backlog_apply.py`, scp updated `src/server.py` with the tool-registration line, `docker cp` into `claude_memory_mcp`, stop/rm/run the container using the docker-compose v1 ContainerConfig workaround (lesson #339).
 3. **Verify tool registration** — confirm `apply_backlog_batch` appears in the MCP tool list.
 4. **Preview-mode test on prod** — call `apply_backlog_batch(batch_run_id="pilot-2026-04-21")`. Expected: `would_apply` ≈ 82 (minus any that became ineligible since 2026-04-20), `first_10` shows the highest-confidence duplicates and supersedes. No DB writes.

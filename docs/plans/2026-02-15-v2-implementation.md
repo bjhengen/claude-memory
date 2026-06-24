@@ -18,7 +18,7 @@
 **Step 1: SSH to EC2 and dump the database**
 
 ```bash
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@44.212.169.119 \
+ssh -i ~/.ssh/your-key.pem ubuntu@ec2.example.com \
   "docker exec claude_memory_db pg_dump -U claude -d claude_memory --format=custom -f /tmp/claude_memory_backup_20260215.dump"
 ```
 
@@ -26,13 +26,13 @@ ssh -i ~/.ssh/AWS_FR.pem ubuntu@44.212.169.119 \
 
 ```bash
 mkdir -p backups
-scp -i ~/.ssh/AWS_FR.pem ubuntu@44.212.169.119:/tmp/claude_memory_backup_20260215.dump backups/
+scp -i ~/.ssh/your-key.pem ubuntu@ec2.example.com:/tmp/claude_memory_backup_20260215.dump backups/
 ```
 
 **Step 3: Verify dump integrity**
 
 ```bash
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@44.212.169.119 \
+ssh -i ~/.ssh/your-key.pem ubuntu@ec2.example.com \
   "docker exec claude_memory_db pg_restore --list /tmp/claude_memory_backup_20260215.dump | head -30"
 ```
 
@@ -116,17 +116,17 @@ from mcp.server.transport_security import TransportSecuritySettings
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://claude:claude@localhost:5432/claude_memory")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 API_KEY = os.getenv("CLAUDE_MEMORY_API_KEY", "dev-key")
-ISSUER_URL = os.getenv("OAUTH_ISSUER_URL", "https://memory.friendly-robots.com")
+ISSUER_URL = os.getenv("OAUTH_ISSUER_URL", "https://memory.example.com")
 
 security_settings = TransportSecuritySettings(
     enable_dns_rebinding_protection=True,
     allowed_hosts=[
         "localhost:8003",
         "127.0.0.1:8003",
-        "memory.friendly-robots.com",
-        "memory.friendly-robots.com:80",
-        "memory.friendly-robots.com:443",
-        "memory.friendly-robots.com:*",
+        "memory.example.com",
+        "memory.example.com:80",
+        "memory.example.com:443",
+        "memory.example.com:*",
     ]
 )
 ```
@@ -307,7 +307,7 @@ if __name__ == "__main__":
 **Step 7: Test locally**
 
 ```bash
-cd /Users/bhengen/dev/claude-memory
+cd /Users/you/dev/claude-memory
 python -c "from src.server import app; print('Import OK')"
 ```
 
@@ -895,7 +895,7 @@ git commit -m "refactor: use resolve_project_id across all tools for consistent 
 **Step 1: Apply migration to live database**
 
 ```bash
-ssh -i ~/.ssh/AWS_FR.pem ubuntu@44.212.169.119 \
+ssh -i ~/.ssh/your-key.pem ubuntu@ec2.example.com \
   "docker exec -i claude_memory_db psql -U claude -d claude_memory" < migrations/002_v2_features.sql
 ```
 
@@ -910,7 +910,7 @@ ssh -i ~/.ssh/AWS_FR.pem ubuntu@44.212.169.119 \
 From Claude Code, test a few core operations:
 - `search("flutter")` - should return results
 - `list_projects()` - should list all 21 projects
-- `get_project("wine.dine Pro")` - should return full context
+- `get_project("example-mobile-app")` - should return full context
 - `write_journal(content="v2 deployment test", tags=["test"])` - should succeed
 
 **Step 4: Verify new tools work**
@@ -944,18 +944,18 @@ Run via the `merge_projects` tool or direct SQL for projects that don't have dup
 
 ```sql
 INSERT INTO project_aliases (alias, project_id)
-SELECT 'recipe sync', id FROM projects WHERE name = 'recipe.sync'
+SELECT 'example api', id FROM projects WHERE name = 'example-api'
 ON CONFLICT DO NOTHING;
 
 INSERT INTO project_aliases (alias, project_id)
-SELECT 'recipesync', id FROM projects WHERE name = 'recipe.sync'
+SELECT 'exampleapi', id FROM projects WHERE name = 'example-api'
 ON CONFLICT DO NOTHING;
 
 INSERT INTO project_aliases (alias, project_id)
-SELECT 'wine dine pro', id FROM projects WHERE name = 'wine.dine Pro'
+SELECT 'example mobile app', id FROM projects WHERE name = 'example-mobile-app'
 ON CONFLICT DO NOTHING;
 
 INSERT INTO project_aliases (alias, project_id)
-SELECT 'winedine', id FROM projects WHERE name = 'wine.dine'
+SELECT 'examplemobileapp', id FROM projects WHERE name = 'example-mobile-app'
 ON CONFLICT DO NOTHING;
 ```

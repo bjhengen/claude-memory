@@ -100,7 +100,7 @@ async def add_machine(
     Register a new machine.
 
     Args:
-        name: Machine identifier (e.g., 'mac-studio', 'slmbeast')
+        name: Machine identifier (e.g., 'workstation', 'ai-server')
         ip: IP address (optional)
         ssh_command: SSH command to connect (optional)
         notes: Additional notes (optional)
