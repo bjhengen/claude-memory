@@ -30,14 +30,13 @@ class MemoryOAuthProvider:
 
     Client registrations and tokens are persisted to PostgreSQL.
     Auth codes and pending auth requests remain in-memory (they expire in minutes).
-    Backward-compatible API key authentication is always available.
+    Authentication is via per-machine api_keys rows or OAuth access tokens.
 
     Uses the shared connection pool (set via set_pool) to avoid transient
     connection failures from creating individual connections per request.
     """
 
-    def __init__(self, api_key: str):
-        self.api_key = api_key
+    def __init__(self):
         self._pool: asyncpg.Pool | None = None
         # Short-lived state stays in memory
         self._auth_codes: dict[str, AuthorizationCode] = {}
@@ -271,15 +270,6 @@ class MemoryOAuthProvider:
                 token=token,
                 client_id=identity.client_id,
                 scopes=identity.scopes,
-                expires_at=None,
-            )
-
-        # Legacy API_KEY back-compat (preserves existing client_id="api-key-user")
-        if token == self.api_key:
-            return AccessToken(
-                token=token,
-                client_id="api-key-user",
-                scopes=[],
                 expires_at=None,
             )
 

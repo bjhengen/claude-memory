@@ -1,7 +1,7 @@
 """Identity resolver for multi-agent attribution.
 
 Maps a request bearer to an Identity(family, client_id, scopes, source) via
-one of three paths: api_keys hash, OAuth access token, or legacy API_KEY env.
+one of two paths: api_keys hash or OAuth access token.
 
 Identity is stored in a contextvars.ContextVar so tools read it via
 `get_identity()` without taking it as a parameter.
@@ -12,7 +12,6 @@ from __future__ import annotations
 import contextvars
 import hashlib
 import logging
-import os
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -21,16 +20,13 @@ import asyncpg
 
 logger = logging.getLogger(__name__)
 
-# Legacy API_KEY (back-compat). Module-level so tests can monkeypatch.
-LEGACY_API_KEY: Optional[str] = os.getenv("CLAUDE_MEMORY_API_KEY")
-
 
 @dataclass(frozen=True)
 class Identity:
     family: str             # 'claude' | 'codex' | 'unknown'
-    client_id: str          # 'legacy-api-key' | 'apikey:N' | 'oauth:<client_id>'
+    client_id: str          # 'apikey:N' | 'oauth:<client_id>'
     scopes: list[str]       # ['read', 'write'] or includes 'admin'
-    source: str             # 'legacy' | 'apikey' | 'oauth'
+    source: str             # 'apikey' | 'oauth'
 
 
 _current_identity: contextvars.ContextVar[Optional[Identity]] = contextvars.ContextVar(
@@ -70,9 +66,7 @@ def classify_family_from_name(client_name: Optional[str]) -> str:
 async def resolve_identity(pool: asyncpg.Pool, bearer: str) -> Optional[Identity]:
     """Resolve a bearer to an Identity. Returns None if unrecognized.
 
-    Order: api_keys -> OAuth -> legacy API_KEY. (api_keys/OAuth tried first so
-    a bearer that happens to match BOTH api_keys and legacy is attributed to
-    api_keys for better forensics.)
+    Order: api_keys -> OAuth.
     """
     # 1. api_keys hash lookup
     bearer_hash = _sha256_hex(bearer)
@@ -136,19 +130,6 @@ async def resolve_identity(pool: asyncpg.Pool, bearer: str) -> Optional[Identity
             client_id=f"oauth:{oauth_client_id}",
             scopes=["read", "write"],
             source="oauth",
-        )
-
-    # 3. Legacy API_KEY (back-compat)
-    if LEGACY_API_KEY and bearer == LEGACY_API_KEY:
-        logger.warning(
-            "DEPRECATION: legacy API_KEY used as bearer. "
-            "Migrate to per-machine api_keys row."
-        )
-        return Identity(
-            family="claude",
-            client_id="legacy-api-key",
-            scopes=["read", "write"],
-            source="legacy",
         )
 
     return None

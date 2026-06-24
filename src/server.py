@@ -18,7 +18,7 @@ from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, Re
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, HTMLResponse, RedirectResponse
 
-from src.config import DATABASE_URL, OPENAI_API_KEY, API_KEY, ISSUER_URL, security_settings
+from src.config import DATABASE_URL, OPENAI_API_KEY, ISSUER_URL, security_settings
 from src.auth import MemoryOAuthProvider
 
 # Configure logging
@@ -76,7 +76,7 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
 
 
 # Create OAuth provider
-oauth_provider = MemoryOAuthProvider(API_KEY)
+oauth_provider = MemoryOAuthProvider()
 
 # Configure OAuth auth settings
 auth_settings = AuthSettings(

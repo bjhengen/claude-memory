@@ -32,7 +32,6 @@ services:
       # No default: compose errors loudly if the shell env doesn't supply these (intentional).
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
-      CLAUDE_MEMORY_API_KEY: ${CLAUDE_MEMORY_API_KEY:-change-this-key}
       # Public host the server is served under (behind nginx/TLS). Set in prod env.
       PUBLIC_HOST: ${PUBLIC_HOST:-}
       OAUTH_ISSUER_URL: ${OAUTH_ISSUER_URL:-}

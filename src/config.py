@@ -6,7 +6,6 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://claude:claude@localhost:5432/claude_memory")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-API_KEY = os.getenv("CLAUDE_MEMORY_API_KEY", "dev-key")  # For backward-compatible API key auth
 
 # Public host the server is served under (behind a TLS reverse proxy in production).
 # Set PUBLIC_HOST in the deployment environment, e.g. "memory.example.com".

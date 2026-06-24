@@ -18,19 +18,6 @@ def _reset_between_tests():
 
 
 @pytest.mark.asyncio
-async def test_legacy_api_key_resolves_to_claude(db_pool, monkeypatch):
-    monkeypatch.setattr("src.identity.LEGACY_API_KEY", "legacy-secret-xyz")
-
-    identity = await resolve_identity(db_pool, "legacy-secret-xyz")
-
-    assert identity is not None
-    assert identity.family == "claude"
-    assert identity.client_id == "legacy-api-key"
-    assert identity.scopes == ["read", "write"]
-    assert identity.source == "legacy"
-
-
-@pytest.mark.asyncio
 async def test_unknown_bearer_returns_none(db_pool):
     identity = await resolve_identity(db_pool, "definitely-not-a-real-token")
     assert identity is None
@@ -100,26 +87,6 @@ async def test_api_keys_admin_scope_preserved(db_pool):
         identity = await resolve_identity(db_pool, raw)
         assert identity is not None
         assert "admin" in identity.scopes
-    finally:
-        await db_pool.execute("DELETE FROM api_keys WHERE id = $1", row["id"])
-
-
-@pytest.mark.asyncio
-async def test_api_keys_wins_over_legacy(db_pool, monkeypatch):
-    """A bearer that matches BOTH legacy API_KEY and an api_keys row resolves via api_keys."""
-    raw = "double-match-bearer-dddd"
-    h = hashlib.sha256(raw.encode()).hexdigest()
-    monkeypatch.setattr("src.identity.LEGACY_API_KEY", raw)
-    row = await db_pool.fetchrow(
-        """INSERT INTO api_keys (api_key_hash, family, label, scopes)
-           VALUES ($1, 'codex', 'overlap', ARRAY['read','write']) RETURNING id""",
-        h,
-    )
-    try:
-        identity = await resolve_identity(db_pool, raw)
-        assert identity is not None
-        assert identity.source == "apikey"
-        assert identity.family == "codex"
     finally:
         await db_pool.execute("DELETE FROM api_keys WHERE id = $1", row["id"])
 
@@ -213,7 +180,7 @@ async def test_oauth_expired_token_does_not_resolve(db_pool):
 
 
 @pytest.mark.asyncio
-async def test_load_access_token_sets_identity_via_apikey(db_pool, monkeypatch):
+async def test_load_access_token_sets_identity_via_apikey(db_pool):
     """An api_keys-issued bearer is accepted by load_access_token AND sets identity."""
     from src.auth import MemoryOAuthProvider
 
@@ -226,9 +193,8 @@ async def test_load_access_token_sets_identity_via_apikey(db_pool, monkeypatch):
     )
     key_id = row["id"]
 
-    provider = MemoryOAuthProvider(api_key="some-other-legacy")
+    provider = MemoryOAuthProvider()
     provider.set_pool(db_pool)
-    monkeypatch.setattr("src.identity.LEGACY_API_KEY", "some-other-legacy")
 
     try:
         result = await provider.load_access_token(raw)
@@ -241,23 +207,3 @@ async def test_load_access_token_sets_identity_via_apikey(db_pool, monkeypatch):
         assert identity.source == "apikey"
     finally:
         await db_pool.execute("DELETE FROM api_keys WHERE id = $1", key_id)
-
-
-@pytest.mark.asyncio
-async def test_load_access_token_legacy_back_compat(db_pool, monkeypatch):
-    """Legacy API_KEY bearer still produces a valid AccessToken AND sets identity."""
-    from src.auth import MemoryOAuthProvider
-
-    provider = MemoryOAuthProvider(api_key="legacy-wire-test-iiii")
-    provider.set_pool(db_pool)
-    monkeypatch.setattr("src.identity.LEGACY_API_KEY", "legacy-wire-test-iiii")
-
-    result = await provider.load_access_token("legacy-wire-test-iiii")
-    assert result is not None
-    # back-compat: legacy AccessToken client_id stays 'api-key-user'
-    assert result.client_id == "api-key-user"
-
-    identity = get_identity()
-    assert identity is not None
-    assert identity.family == "claude"
-    assert identity.source == "legacy"

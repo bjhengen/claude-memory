@@ -7,6 +7,7 @@ identity set in load_access_token reaches the tool handler.
 import asyncio
 import contextlib
 import contextvars
+import hashlib
 import os
 
 import asyncpg
@@ -61,22 +62,30 @@ async def test_contextvar_propagates_from_auth_to_tool():
         "postgresql://claude:claude@192.168.1.234:5434/claude_memory_test",
     )
     os.environ["DATABASE_URL"] = test_db_url
-    os.environ["CLAUDE_MEMORY_API_KEY"] = "spike-test-key"
     os.environ.setdefault("OPENAI_API_KEY", "sk-dummy")
     os.environ.setdefault("ANTHROPIC_API_KEY", "sk-dummy")
 
     # NOTE: under the full test suite, src.server may already have been
-    # imported with a different CLAUDE_MEMORY_API_KEY and DATABASE_URL (config
-    # reads env at import time and caches them as module-level constants).
-    # We override the live oauth_provider.api_key and wire a pool against
-    # the test DB explicitly to make this test independent of import order.
+    # imported with a different DATABASE_URL (config reads env at import time
+    # and caches it as a module-level constant). We wire a pool against the
+    # test DB explicitly to make this test independent of import order.
     from src import server as server_module
     from src.server import app, mcp, oauth_provider
     from src import auth as auth_module
 
-    oauth_provider.api_key = "spike-test-key"
     test_pool = await asyncpg.create_pool(test_db_url, min_size=1, max_size=2)
     oauth_provider.set_pool(test_pool)
+
+    # Authenticate the spike request via a real api_keys row; the bearer
+    # 'spike-test-key' is hash-matched by resolve_identity.
+    bearer = "spike-test-key"
+    key_hash = hashlib.sha256(bearer.encode()).hexdigest()
+    apikey_row = await test_pool.fetchrow(
+        """INSERT INTO api_keys (api_key_hash, family, client_name, label, scopes)
+           VALUES ($1, 'claude', 'spike', 'e2e-spike', ARRAY['read','write'])
+           RETURNING id""",
+        key_hash,
+    )
     # Force MCP per-session lifespan (app_lifespan -> _ensure_pool) to use
     # the same test pool, not the default-config DATABASE_URL that
     # server.py captured at import time. server.py caches both DATABASE_URL
@@ -156,6 +165,7 @@ async def test_contextvar_propagates_from_auth_to_tool():
     finally:
         # Restore class method so we don't poison other tests in the suite.
         auth_module.MemoryOAuthProvider.load_access_token = original
+        await test_pool.execute("DELETE FROM api_keys WHERE id = $1", apikey_row["id"])
         # Detach the test pool from server-level state before closing it so a
         # later test that re-enters _ensure_pool() doesn't reuse a closed pool.
         server_module._db_pool = None
