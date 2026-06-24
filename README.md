@@ -1,114 +1,85 @@
 # Claude Memory
 
-A cross-machine, **cross-agent**, cross-project memory system for AI coding sessions. Provides persistent, attributed storage for lessons learned, project context, infrastructure details, codified agent/spec knowledge, an MCP server registry, a consolidation pipeline, and a reflective journal — shared across every machine and agent that connects.
+**A persistent, cross-agent memory server for AI coding sessions.**
 
-Originally built for Claude Code; as of **v6** it is multi-agent (Claude + Codex) with per-write attribution.
+One shared knowledge base — lessons learned, project context, infrastructure topology, reusable agent/spec definitions, and a reflective journal — that every machine and every coding agent (Claude, Codex, …) reads from and writes to over the [Model Context Protocol](https://modelcontextprotocol.io) (MCP), with per-write attribution so contributions never silently collide.
 
-## Features
+---
 
-- **Semantic + keyword search** — hybrid, confidence-weighted ranking over lessons, patterns, and sessions
-- **Project context** — approaches, key files, guardrails, per-project `CLAUDE.md` storage, aliases
-- **Infrastructure tracking** — machines, containers, databases, SSH connectivity
-- **Session history** — log sessions and pick up where you left off
-- **Codified context (v3)** — reusable agent specifications, long-form spec documents, and a unified `find_context` retrieval tool
-- **MCP server registry (v3)** — catalog of MCP servers/tools, discoverable via `find_mcp_tools`
-- **Feedback loop (v4)** — lesson up/down ratings affect search ranking; polymorphic annotations on any entity
-- **Consolidation pipeline (v5)** — automatic duplicate/supersede detection with an auditable human-review queue
-- **Multi-agent attribution (v6)** — every write stamped with `source_agent` + `source_client_id`; per-machine bearer tokens; cross-agent auto-merge is skipped to prevent silent corpus drift
+## Why this exists
+
+AI coding agents start every session from zero. Context that took real effort to discover — a deployment gotcha, why a library was chosen, the shape of an unfamiliar subsystem — evaporates when the session ends, and the next session (often on a different machine, increasingly with a *different agent*) rediscovers it from scratch.
+
+Claude Memory is a long-lived MCP server that gives agents a shared, queryable memory across machines, projects, **and agent families**. It is deliberately *not* a generic vector store: it models the structure of developer knowledge — lessons, patterns, project state, infrastructure, codified agent specs — and adds the machinery to keep that memory trustworthy as it grows and as multiple agents write to it concurrently.
+
+It has run in production as the author's daily driver since early 2026, accumulating ~750 lessons across several machines and, as of v6, more than one agent family.
+
+## What makes it interesting
+
+- **Cross-agent attribution (v6).** Every write is stamped with its `source_agent` (e.g. `claude`, `codex`) and client identity. *Owned* content (lessons, journal, specs) is protected by an ownership rule — one agent can't silently overwrite another's memory — while *shared* project metadata is last-writer-wins. This is what lets Claude and Codex collaborate in one corpus without drift.
+- **Self-consolidating memory (v5).** Each new lesson is embedding-gated and adjudicated by an LLM judge against its nearest neighbors. High-confidence duplicates/supersedes merge automatically; everything ambiguous lands in an *auditable human-review queue*. Cross-agent pairs are deliberately never auto-merged.
+- **Tiered, codified context (v3).** Beyond ad-hoc lessons, the server stores reusable **agent specifications**, long-form **spec documents**, and a **registry of MCP servers/tools** — all retrievable through a single `find_context` call.
+- **Hybrid retrieval with feedback (v4).** Semantic + keyword search with confidence-weighted ranking; up/down lesson ratings feed back into result ordering, and polymorphic annotations can be attached to any entity.
+
+## How a request flows
+
+```
+  bearer token
+       │
+       ▼
+ ┌─────────────┐   api_keys (per-machine/per-agent hashed token)
+ │  identity   │── or ─────────────────────────────────────────►  Identity
+ │  resolver   │   OAuth access token                              (family, client, scopes)
+ └─────────────┘
+       │ every write stamped with source_agent + source_client_id
+       ▼
+ ┌──────────────────────────────────────────────────────────────┐
+ │  owned content  ── rule-b ownership check                     │
+ │  shared metadata ── last-writer-wins                          │
+ └──────────────────────────────────────────────────────────────┘
+       │ new lessons
+       ▼
+ ┌──────────────────────────────────────────────────────────────┐
+ │  consolidation: embedding gate → LLM judge → auto-merge       │
+ │  or human-review queue   (cross-agent pairs never auto-merge) │
+ └──────────────────────────────────────────────────────────────┘
+```
 
 ## Architecture
 
-- **PostgreSQL 16** (`pgvector/pgvector:pg16`) for storage + semantic search
-- **Python 3.11** MCP server using FastMCP, served over HTTP
-- **OpenAI ada-002** for embeddings
-- **Docker Compose** deployment behind nginx on AWS EC2
-- **57 MCP tools** across 14 functional areas (see below)
+- **PostgreSQL 16** (`pgvector/pgvector:pg16`) for structured storage + semantic search
+- **Python 3.11** MCP server built on **FastMCP**, served over HTTP
+- **OpenAI `text-embedding-ada-002`** for embeddings
+- **Docker Compose** behind nginx
+- **57 MCP tools** across 14 functional modules
 
 ### Multi-agent identity (v6)
 
-Authentication resolves an identity in this order:
+Authentication resolves a caller to an identity in this order:
 
-1. **`api_keys` table** (per-machine/per-agent bearer tokens) — hash-matched, identifies the calling agent via `family` / `client_name` / `label`
-2. **OAuth access tokens** (with expiry filtering)
-3. **Legacy `CLAUDE_MEMORY_API_KEY`** shared bearer — *deprecated, back-compat only, slated for removal*
+1. **`api_keys` table** — per-machine/per-agent bearer tokens, hash-matched; identifies the calling agent via `family` / `client_name` / `label`. Issued/revoked/listed with the admin scripts in `scripts/` (per-machine revocation, no shared secret to rotate).
+2. **OAuth access tokens** (with expiry filtering), for clients that register dynamically.
 
-Every write tool stamps `source_agent` (e.g. `claude`, `codex`) and `source_client_id` onto the row. Shared-metadata writes use last-writer-wins; owned-content updates/retires enforce rule-b (an agent may only mutate its own content unless it has admin scope). Cross-agent pairs are skipped by the consolidation pipeline.
+Every write tool stamps `source_agent` (e.g. `claude`, `codex`) and `source_client_id` onto the row. Shared-metadata writes are last-writer-wins; owned-content updates/retires enforce **rule-b** (an agent may only mutate its own content unless it holds `admin` scope). Cross-agent pairs are skipped by the consolidation pipeline, so two agents writing in different voices on the same topic are never silently merged.
 
-Per-machine tokens are issued/revoked/listed with the admin scripts in `scripts/` (`issue_api_key.py`, `revoke_api_key.py`, `list_api_keys.py`).
+## The 57 tools
 
-## Quick Start
+Grouped by surface (full table below):
 
-### 1. Configure Environment
+| Area | Tools |
+|------|-------|
+| **Search & retrieval** | `search`, `search_lessons`, `find_context` |
+| **Lessons & patterns** | `log_lesson`, `log_pattern`, `update_lesson`, `retire_lesson`, `rate_lesson` |
+| **Projects** | `get_project`, `list_projects`, `add_project`, `update_project_state`, per-project `CLAUDE.md` storage, `merge_projects` |
+| **Sessions & journal** | `start_session`/`end_session`, `write_journal`/`read_journal` |
+| **Infrastructure** | `get_connectivity`, `list_machines`/`add_machine`, `add_container` |
+| **Codified context (v3)** | agent specs, spec documents, MCP server/tool registry, `suggest_agent` |
+| **Feedback (v4)** | `annotate`/`get_annotations`/`clear_annotation` |
+| **Consolidation (v5)** | review queue, conflict handling, `undo_consolidation`, `get_consolidation_stats` |
+| **Admin & access (v6)** | `check_guardrails`, `get_permissions`, `list_clients` |
 
-```bash
-cp .env.example .env
-# Edit .env with your values:
-# - POSTGRES_PASSWORD
-# - OPENAI_API_KEY
-# - CLAUDE_MEMORY_API_KEY   (legacy shared bearer; v6 prefers per-machine api_keys)
-```
-
-### 2. Deploy to AWS
-
-```bash
-./deploy.sh
-```
-
-> Note: production is an rsync-managed directory on EC2, **not** a git checkout. `deploy.sh` handles the sync + container rebuild.
-
-### 3. Configure nginx (on EC2)
-
-Add the contents of `nginx-snippet.conf` to your nginx server block, then:
-
-```bash
-sudo nginx -t && sudo systemctl reload nginx
-```
-
-### 4. Database & Migrations
-
-The base schema is `db/schema.sql`. Versioned migrations live in `db/migrations/` and are applied in order:
-
-```
-001_add_journal.sql
-v4_feedback_loop.sql
-v5_consolidation.sql
-v5_1_backlog_analysis.sql
-v5_oauth_persistence.sql
-v6_attribution.sql
-```
-
-Seed initial data:
-
-```bash
-export DATABASE_URL="postgresql://claude:YOUR_PASSWORD@<YOUR_EC2_IP>:5433/claude_memory"
-export OPENAI_API_KEY="sk-your-key"
-python scripts/seed_data.py
-```
-
-### 5. Issue a per-machine token (v6)
-
-```bash
-# On the server, against the prod DB
-python scripts/issue_api_key.py --label "Workstation" --client-name claude-code --family claude
-python scripts/list_api_keys.py
-```
-
-### 6. Configure the MCP client
-
-On each machine, add the MCP server using the Claude Code CLI (Codex uses its analogous config):
-
-```bash
-# Add with user scope (available in all projects)
-claude mcp add -s user -t http claude-memory https://your-domain.com/mcp \
-  -H "Authorization: Bearer YOUR_PER_MACHINE_TOKEN"
-
-# Verify it's connected
-claude mcp list
-```
-
-**Scope options:** `-s user` (all projects, recommended) · `-s local` (current dir) · `-s project` (current project). Config is stored in `~/.claude.json`.
-
-## MCP Tools (57)
+<details>
+<summary><b>Full tool reference (all 57)</b></summary>
 
 ### Search & retrieval
 | Tool | Description |
@@ -187,67 +158,78 @@ claude mcp list
 | `get_permissions` | Get permissions for a scope |
 | `list_clients` | List registered agent clients *(admin scope)* |
 
-## Directory Structure
+</details>
+
+## Quick start
+
+### 1. Configure environment
+
+```bash
+cp .env.example .env
+# Fill in:
+#   POSTGRES_PASSWORD
+#   OPENAI_API_KEY        (embeddings)
+#   ANTHROPIC_API_KEY     (consolidation judge)
+#   PUBLIC_HOST           (prod only — the host you serve under, e.g. memory.example.com)
+```
+
+### 2. Run locally
+
+```bash
+docker-compose up -d db                 # Postgres + pgvector
+export DATABASE_URL="postgresql://claude:claude@localhost:5433/claude_memory"
+export OPENAI_API_KEY="sk-your-key"
+python -m src.server                    # MCP server on :8003
+```
+
+### 3. Deploy
+
+```bash
+EC2_HOST=ubuntu@your-host SSH_KEY=~/.ssh/your-key.pem ./deploy.sh
+```
+
+`deploy.sh` syncs the project and rebuilds the containers. In production the server sits behind nginx, and `PUBLIC_HOST` is added to the transport-security (DNS-rebinding) allowlist — see `nginx-snippet.conf`. The base schema is `db/schema.sql`; versioned migrations live in `db/migrations/` and apply in order.
+
+### 4. Issue a per-machine token and connect a client
+
+```bash
+# On the server, against the prod DB:
+python scripts/issue_api_key.py --label "Workstation" --client-name claude-code --family claude
+
+# On each machine (Codex uses its analogous MCP config):
+claude mcp add -s user -t http claude-memory https://your-domain.com/mcp \
+  -H "Authorization: Bearer YOUR_PER_MACHINE_TOKEN"
+claude mcp list
+```
+
+## Repository layout
 
 ```
 claude-memory/
-├── db/
-│   ├── schema.sql            # Base database schema
-│   └── migrations/           # Versioned migrations (v4…v6)
-├── docs/
-│   └── plans/                # Per-version design + implementation docs
-├── scripts/
-│   ├── seed_data.py          # Initial data population
-│   ├── issue_api_key.py      # v6: issue per-machine token (admin)
-│   ├── revoke_api_key.py     # v6: revoke a token (admin)
-│   ├── list_api_keys.py      # v6: list tokens (admin)
-│   ├── analyze_backlog.py    # v5.1: consolidation backlog analysis
-│   └── backlog_report.py     # v5.1: backlog reporting CLI
+├── db/            schema.sql + versioned migrations (v4…v6)
+├── docs/plans/    per-version design + implementation docs
+├── scripts/       seeding, per-machine token admin, backlog analysis
 ├── src/
-│   ├── server.py             # MCP server entrypoint + lifespan
-│   ├── auth.py               # Auth middleware
-│   ├── identity.py           # v6: identity resolver (api_keys/OAuth/legacy)
-│   ├── config.py · db.py · helpers.py
-│   ├── consolidation/        # v5 consolidation pipeline
-│   └── tools/                # 14 tool modules, 57 MCP tools
-├── tests/                    # pytest suite (identity, rule-b, migration, …)
-├── deploy.sh                 # rsync + container rebuild
-├── docker-compose.yml · Dockerfile
-├── nginx-snippet.conf
-└── README.md
+│   ├── server.py        MCP entrypoint + lifespan
+│   ├── identity.py      v6 identity resolver (api_keys / OAuth)
+│   ├── auth.py          OAuth provider + token validation
+│   ├── consolidation/   v5 consolidation pipeline
+│   └── tools/           14 tool modules, 57 MCP tools
+├── tests/         pytest suite (identity, rule-b, migration, …)
+├── deploy.sh · docker-compose.yml · Dockerfile · nginx-snippet.conf
 ```
 
 ## Development
 
-### Local Testing
-
-```bash
-# Start database only
-docker-compose up -d db
-
-# Run server locally
-export DATABASE_URL="postgresql://claude:claude@localhost:5433/claude_memory"
-export OPENAI_API_KEY="sk-your-key"
-python -m src.server
-```
-
-### Running Tests
-
 ```bash
 pip install -r requirements-dev.txt
-pytest                       # full suite
+pytest                                   # full suite
 pytest tests/test_identity.py tests/test_rule_b.py   # v6 attribution/enforcement
 ```
 
-### Viewing Logs
+Set `TEST_DATABASE_URL` to point the suite at a Postgres test database with the current schema applied.
 
-```bash
-# On EC2
-docker logs claude_memory_mcp --tail 100 -f
-docker logs claude_memory_db  --tail 100 -f
-```
-
-## Version History
+## Version history
 
 | Version | Theme |
 |---------|-------|
@@ -258,4 +240,4 @@ docker logs claude_memory_db  --tail 100 -f
 | v5 | Consolidation pipeline: duplicate/supersede detection + auditable review queue |
 | v6 | Multi-agent attribution: `source_agent`/`source_client_id`, per-machine tokens, rule-b enforcement, cross-agent consolidation skip |
 
-> `UPDATE_NOTES.md` is a historical Jan-2026 (v1-era) deployment snapshot, kept as an artifact — it does not reflect the current tool surface; this README does. Per-version design rationale lives in `docs/plans/`.
+Per-version design rationale lives in `docs/plans/`.
