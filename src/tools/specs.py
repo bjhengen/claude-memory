@@ -334,8 +334,8 @@ async def search_specs(
     embedding_str = format_embedding(embedding)
 
     conditions = ["s.embedding IS NOT NULL", "s.retired_at IS NULL"]
-    params = [embedding_str]
-    param_idx = 2
+    params = [embedding_str, query]
+    param_idx = 3
 
     if project:
         project_id = await resolve_project_id(app.db, project)
@@ -361,7 +361,10 @@ async def search_specs(
         FROM specifications s
         LEFT JOIN projects p ON s.project_id = p.id
         WHERE {where_clause}
-        ORDER BY similarity DESC
+        ORDER BY (1 - (s.embedding <=> $1::vector)
+                  + CASE WHEN s.tsv @@ plainto_tsquery('english', $2)
+                         THEN ts_rank(s.tsv, plainto_tsquery('english', $2)) * 0.3
+                         ELSE 0.0 END) DESC
         LIMIT ${param_idx}
         """,
         *params

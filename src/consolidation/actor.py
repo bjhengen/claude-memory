@@ -117,12 +117,37 @@ async def execute_auto_merge(
     """
     async with pool.acquire() as conn:
         async with conn.transaction():
+            # Serialize concurrent merges of the same pair (two simultaneous
+            # log_lessons can each try to merge into the other).
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock("
+                "least($1::int, $2::int), greatest($1::int, $2::int))",
+                new_lesson_id, canonical_id,
+            )
+
             new = await conn.fetchrow(
-                "SELECT upvotes, downvotes, tags, severity FROM lessons WHERE id=$1",
+                "SELECT upvotes, downvotes, tags, severity, retired_at "
+                "FROM lessons WHERE id=$1",
                 new_lesson_id,
             )
             if new is None:
                 raise ValueError(f"new lesson {new_lesson_id} not found")
+
+            # Already merged (e.g. by a concurrent call or a retry): return
+            # the existing audit row instead of double-transferring counters.
+            if new["retired_at"] is not None:
+                existing = await conn.fetchrow(
+                    "SELECT id FROM lesson_merges "
+                    "WHERE canonical_id=$1 AND merged_id=$2 AND reversed_at IS NULL",
+                    canonical_id, new_lesson_id,
+                )
+                if existing:
+                    return existing["id"]
+                raise ValueError(
+                    f"lesson {new_lesson_id} is retired but has no merge row "
+                    f"into {canonical_id}"
+                )
+
             new_up = new["upvotes"] or 0
             new_down = new["downvotes"] or 0
 

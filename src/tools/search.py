@@ -31,51 +31,12 @@ async def search(
     embedding = await get_embedding(app.openai, query)
     embedding_str = format_embedding(embedding)
 
-    # When source_agent is set, oversample so post-filtering still has enough.
-    fetch_limit = limit * 5 if source_agent else limit
+    # source_agent filtering happens inside semantic_search (v9) — full
+    # recall for the requested agent, no oversample-and-post-filter.
     rows = await app.db.fetch(
-        "SELECT * FROM semantic_search($1::vector, $2, $3)",
-        embedding_str, query, fetch_limit
+        "SELECT * FROM semantic_search($1::vector, $2, $3, $4)",
+        embedding_str, query, limit, source_agent
     )
-
-    if not rows:
-        return json.dumps({"results": [], "message": "No matches found"})
-
-    # Optional post-filter by source_agent. The semantic_search SQL function
-    # does not return source_agent, so we batch-look-up per source table.
-    if source_agent:
-        # Group IDs by source_type to do one query per table.
-        type_to_ids: dict[str, list[int]] = {}
-        for row in rows:
-            type_to_ids.setdefault(row["source_type"], []).append(row["source_id"])
-
-        # Map source_type -> SQL table name. Tables without source_agent are
-        # excluded entirely when a filter is requested (no way to attribute).
-        source_table = {
-            "lesson": "lessons",
-            "pattern": "patterns",
-            "journal": "journal",
-            "agent_spec": "agent_specs",
-            "specification": "specifications",
-            "mcp_server": "mcp_servers",
-            # "session" and "mcp_tool" have no source_agent column or are
-            # junction-style; they are filtered out when source_agent is set.
-        }
-
-        allowed: set[tuple[str, int]] = set()
-        for stype, ids in type_to_ids.items():
-            table = source_table.get(stype)
-            if not table:
-                continue
-            attr_rows = await app.db.fetch(
-                f"SELECT id FROM {table} WHERE id = ANY($1::int[]) AND source_agent = $2",
-                ids, source_agent,
-            )
-            for r in attr_rows:
-                allowed.add((stype, r["id"]))
-
-        rows = [r for r in rows if (r["source_type"], r["source_id"]) in allowed]
-        rows = rows[:limit]
 
     if not rows:
         return json.dumps({"results": [], "message": "No matches found"})
@@ -171,22 +132,17 @@ async def search_lessons(
                         THEN ts_rank(l.tsv, plainto_tsquery('english', $2)) * 0.3
                         ELSE 0.0
                    END as keyword_boost,
-                   CASE WHEN (COALESCE(l.upvotes, 0) + COALESCE(l.downvotes, 0)) > 0
-                        THEN 0.5 + (COALESCE(l.upvotes, 0)::FLOAT / (COALESCE(l.upvotes, 0) + COALESCE(l.downvotes, 0))::FLOAT * 0.5)
-                        ELSE 1.0
-                   END as confidence,
                    (SELECT COUNT(*) FROM annotations a WHERE a.entity_type = 'lesson' AND a.entity_id = l.id) as annotation_count
             FROM lessons l
             LEFT JOIN projects p ON l.project_id = p.id
             WHERE {where_clause} AND l.embedding IS NOT NULL
-            ORDER BY (1 - (l.embedding <=> $1::vector)
-                      + CASE WHEN l.tsv @@ plainto_tsquery('english', $2)
-                             THEN ts_rank(l.tsv, plainto_tsquery('english', $2)) * 0.3
-                             ELSE 0.0 END)
-                     * CASE WHEN (COALESCE(l.upvotes, 0) + COALESCE(l.downvotes, 0)) > 0
-                            THEN 0.5 + (COALESCE(l.upvotes, 0)::FLOAT / (COALESCE(l.upvotes, 0) + COALESCE(l.downvotes, 0))::FLOAT * 0.5)
-                            ELSE 1.0 END
-                     DESC
+            ORDER BY memory_rank(
+                (1 - (l.embedding <=> $1::vector))::float,
+                (CASE WHEN l.tsv @@ plainto_tsquery('english', $2)
+                      THEN ts_rank(l.tsv, plainto_tsquery('english', $2)) * 0.3
+                      ELSE 0.0 END)::float,
+                (EXTRACT(EPOCH FROM (NOW() - l.learned_at)) / 86400.0)::float
+            ) DESC
             LIMIT ${param_idx}
         """
         params.append(limit)
@@ -268,7 +224,9 @@ async def find_context(
             agent_idx += 1
 
         agent_where = " AND ".join(agent_conditions)
-        agent_params.append(limit_per_tier)
+        # Wide pool before trigger rescoring — truncating at limit_per_tier
+        # here would cut agents whose trigger bonus should promote them.
+        agent_params.append(50)
 
         rows = await app.db.fetch(
             f"""
@@ -284,14 +242,13 @@ async def find_context(
             *agent_params
         )
 
-        # Add trigger keyword scoring
-        task_lower = query.lower()
+        # Trigger keyword scoring — same formula as suggest_agent.
+        from src.tools.agents import score_triggers
         agents = []
         for row in rows:
-            matched = [t for t in (row["triggers"] or []) if t.lower() in task_lower]
             semantic = float(row["similarity"])
-            trigger_bonus = min(len(matched), 3) / 3.0 * 0.4
-            combined = semantic * 0.6 + trigger_bonus
+            trigger_score, matched = score_triggers(query, row["triggers"])
+            combined = semantic * 0.6 + trigger_score / 3.0 * 0.4
             confidence = "high" if combined >= 0.7 else "medium" if combined >= 0.5 else "low"
             agents.append({
                 "name": row["name"],
@@ -303,13 +260,13 @@ async def find_context(
                 "matched_triggers": matched
             })
         agents.sort(key=lambda x: x["similarity"], reverse=True)
-        result["agents"] = agents
+        result["agents"] = agents[:limit_per_tier]
 
     # --- Specifications tier ---
     if "specs" in active_tiers:
         spec_conditions = ["s.embedding IS NOT NULL", "s.retired_at IS NULL"]
-        spec_params = [embedding_str]
-        spec_idx = 2
+        spec_params = [embedding_str, query]
+        spec_idx = 3
 
         if project_id:
             spec_conditions.append(f"s.project_id = ${spec_idx}")
@@ -327,7 +284,10 @@ async def find_context(
             FROM specifications s
             LEFT JOIN projects p ON s.project_id = p.id
             WHERE {spec_where}
-            ORDER BY similarity DESC
+            ORDER BY (1 - (s.embedding <=> $1::vector)
+                      + CASE WHEN s.tsv @@ plainto_tsquery('english', $2)
+                             THEN ts_rank(s.tsv, plainto_tsquery('english', $2)) * 0.3
+                             ELSE 0.0 END) DESC
             LIMIT ${spec_idx}
             """,
             *spec_params
@@ -370,22 +330,17 @@ async def find_context(
                         THEN ts_rank(l.tsv, plainto_tsquery('english', $2)) * 0.3
                         ELSE 0.0
                    END as keyword_boost,
-                   CASE WHEN (COALESCE(l.upvotes, 0) + COALESCE(l.downvotes, 0)) > 0
-                        THEN 0.5 + (COALESCE(l.upvotes, 0)::FLOAT / (COALESCE(l.upvotes, 0) + COALESCE(l.downvotes, 0))::FLOAT * 0.5)
-                        ELSE 1.0
-                   END as confidence,
                    (SELECT COUNT(*) FROM annotations a WHERE a.entity_type = 'lesson' AND a.entity_id = l.id) as annotation_count
             FROM lessons l
             LEFT JOIN projects p ON l.project_id = p.id
             WHERE {lesson_where}
-            ORDER BY (1 - (l.embedding <=> $1::vector)
-                      + CASE WHEN l.tsv @@ plainto_tsquery('english', $2)
-                             THEN ts_rank(l.tsv, plainto_tsquery('english', $2)) * 0.3
-                             ELSE 0.0 END)
-                     * CASE WHEN (COALESCE(l.upvotes, 0) + COALESCE(l.downvotes, 0)) > 0
-                            THEN 0.5 + (COALESCE(l.upvotes, 0)::FLOAT / (COALESCE(l.upvotes, 0) + COALESCE(l.downvotes, 0))::FLOAT * 0.5)
-                            ELSE 1.0 END
-                     DESC
+            ORDER BY memory_rank(
+                (1 - (l.embedding <=> $1::vector))::float,
+                (CASE WHEN l.tsv @@ plainto_tsquery('english', $2)
+                      THEN ts_rank(l.tsv, plainto_tsquery('english', $2)) * 0.3
+                      ELSE 0.0 END)::float,
+                (EXTRACT(EPOCH FROM (NOW() - l.learned_at)) / 86400.0)::float
+            ) DESC
             LIMIT ${lesson_idx}
             """,
             *lesson_params
@@ -410,8 +365,8 @@ async def find_context(
     # --- MCP tools tier ---
     if "mcp_tools" in active_tiers:
         mcp_conditions = ["t.embedding IS NOT NULL", "s.retired_at IS NULL"]
-        mcp_params = [embedding_str]
-        mcp_idx = 2
+        mcp_params = [embedding_str, query]
+        mcp_idx = 3
         mcp_joins = ""
 
         if project_id:
@@ -434,7 +389,10 @@ async def find_context(
             LEFT JOIN machines m ON s.machine_id = m.id
             {mcp_joins}
             WHERE {mcp_where}
-            ORDER BY similarity DESC
+            ORDER BY (1 - (t.embedding <=> $1::vector)
+                      + CASE WHEN t.tsv @@ plainto_tsquery('english', $2)
+                             THEN ts_rank(t.tsv, plainto_tsquery('english', $2)) * 0.3
+                             ELSE 0.0 END) DESC
             LIMIT ${mcp_idx}
             """,
             *mcp_params

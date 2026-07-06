@@ -273,8 +273,10 @@ async def rate_lesson(
     ctx: Context = None
 ) -> str:
     """
-    Rate a lesson as helpful or unhelpful. Ratings affect search ranking —
-    low-rated lessons appear lower in results but are never auto-retired.
+    Rate a lesson as helpful or unhelpful. Votes are recorded on the lesson
+    (shown in search payloads; higher-voted lessons win duplicate merges) and
+    a downvote flags the lesson for human retirement review — surfaced via
+    get_consolidation_stats. Ratings do not scale search ranking (v9).
 
     Args:
         lesson_id: ID of the lesson to rate
@@ -313,11 +315,24 @@ async def rate_lesson(
             lesson_id, f"[{prefix}] {comment}"
         )
 
+    # A downvote flags the lesson for human retirement review — the honest
+    # role for negative feedback now that votes don't scale ranking.
+    if rating == "down":
+        await app.db.execute(
+            """
+            INSERT INTO annotations (entity_type, entity_id, note)
+            VALUES ('lesson', $1, $2)
+            """,
+            lesson_id,
+            f"⚠️ flagged for retirement review (downvote #{new_down})",
+        )
+
     return json.dumps({
         "success": True,
         "lesson_id": lesson_id,
         "title": existing["title"],
         "upvotes": new_up,
         "downvotes": new_down,
+        "flagged_for_review": rating == "down",
         "message": f"Lesson {lesson_id} rated '{rating}'"
     })

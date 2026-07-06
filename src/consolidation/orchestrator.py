@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 
 import asyncpg
 from anthropic import AsyncAnthropic
@@ -69,6 +70,8 @@ async def consolidate_at_log(
     Failure modes always return {"action_taken": "ignored", ...} + log a warning.
     The caller (log_lesson) treats any return as non-fatal.
     """
+    started = time.monotonic()
+
     if not config.ENABLED:
         return {"action_taken": "ignored", "reason": "disabled",
                 "candidate_count": 0, "best_verdict": None, "confidence": None}
@@ -161,9 +164,10 @@ async def consolidate_at_log(
         summary["action_taken"] = "ignored"
         summary["reason"] = f"actor_error:{type(e).__name__}"
 
+    summary["elapsed_ms"] = int((time.monotonic() - started) * 1000)
     logger.info(
-        "consolidation: candidates=%d verdict=%s confidence=%s action=%s",
+        "consolidation: candidates=%d verdict=%s confidence=%s action=%s elapsed_ms=%d",
         summary["candidate_count"], summary["best_verdict"],
-        summary["confidence"], summary["action_taken"],
+        summary["confidence"], summary["action_taken"], summary["elapsed_ms"],
     )
     return summary

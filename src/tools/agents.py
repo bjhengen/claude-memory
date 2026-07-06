@@ -9,6 +9,25 @@ from src.helpers import resolve_project_id, fetch_annotations
 from src.identity import stamp, assert_can_write
 
 
+def score_triggers(task_description: str, triggers) -> tuple[float, list[str]]:
+    """Trigger keyword score (0..3) plus matched triggers. Full-phrase
+    substring match = 1.0, single-word match = 0.5. Shared by suggest_agent
+    and find_context's agents tier so both surfaces rank agents identically.
+    """
+    task_lower = task_description.lower()
+    task_words = set(task_lower.split())
+    score, matched = 0.0, []
+    for trigger in (triggers or []):
+        t = trigger.lower()
+        if t in task_lower:
+            score += 1.0
+            matched.append(trigger)
+        elif t in task_words:
+            score += 0.5
+            matched.append(trigger)
+    return min(score, 3.0), matched
+
+
 @mcp.tool()
 async def register_agent(
     name: str,
@@ -354,7 +373,9 @@ async def suggest_agent(
             params.append(project_id)
             param_idx += 1
 
-    # Semantic search
+    # Semantic search. Pool is deliberately wide (50, not the final top-3):
+    # trigger rescoring below can promote an agent from deep in the semantic
+    # ordering, so truncating early would cut it before its bonus applies.
     rows = await app.db.fetch(
         f"""
         SELECT a.id, a.name, a.description, a.summary, a.model,
@@ -364,31 +385,21 @@ async def suggest_agent(
         LEFT JOIN projects p ON a.project_id = p.id
         WHERE a.embedding IS NOT NULL {project_filter}
         ORDER BY similarity DESC
-        LIMIT 10
+        LIMIT 50
         """,
         *params
     )
 
     # Score: combine semantic similarity with trigger keyword matching
-    task_lower = task_description.lower()
-    task_words = set(task_lower.split())
     scored = []
 
     for row in rows:
         semantic_score = float(row["similarity"])
-        trigger_score = 0.0
-        matched_triggers = []
-
-        for trigger in (row["triggers"] or []):
-            if trigger.lower() in task_lower:
-                trigger_score += 1.0
-                matched_triggers.append(trigger)
-            elif trigger.lower() in task_words:
-                trigger_score += 0.5
-                matched_triggers.append(trigger)
+        trigger_score, matched_triggers = score_triggers(
+            task_description, row["triggers"])
 
         # Weighted combination: 60% semantic, 40% trigger
-        combined = (semantic_score * 0.6) + (min(trigger_score, 3.0) / 3.0 * 0.4)
+        combined = (semantic_score * 0.6) + (trigger_score / 3.0 * 0.4)
 
         scored.append({
             "name": row["name"],

@@ -514,7 +514,15 @@ async def _compute_stats(pool, days: int) -> dict:
              WHERE resolved_at IS NULL) AS conflicts_pending,
 
           (SELECT COUNT(*) FROM consolidation_queue
-             WHERE decided_at IS NULL) AS queue_depth
+             WHERE decided_at IS NULL) AS queue_depth,
+
+          (SELECT COUNT(*) FROM lessons
+             WHERE COALESCE(downvotes, 0) > 0
+               AND retired_at IS NULL) AS lessons_flagged_for_review,
+
+          (SELECT floor(EXTRACT(EPOCH FROM (NOW() - MIN(flagged_at))) / 86400)::int
+             FROM lesson_conflicts
+             WHERE resolved_at IS NULL) AS oldest_pending_conflict_days
         """,
         days,
     )
@@ -533,6 +541,8 @@ async def _compute_stats(pool, days: int) -> dict:
         "conflicts_resolved": d["conflicts_resolved"],
         "conflicts_pending": d["conflicts_pending"],
         "queue_depth": d["queue_depth"],
+        "lessons_flagged_for_review": d["lessons_flagged_for_review"],
+        "oldest_pending_conflict_days": d["oldest_pending_conflict_days"],
     }
 
 

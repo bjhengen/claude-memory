@@ -95,7 +95,8 @@ async def read_journal(
         embedding = await get_embedding(app.openai, query)
         embedding_str = format_embedding(embedding)
         params.append(embedding_str)
-        param_idx = 2
+        params.append(query)
+        param_idx = 3
     else:
         param_idx = 1
 
@@ -125,7 +126,13 @@ async def read_journal(
             FROM journal j
             LEFT JOIN projects p ON j.project_id = p.id
             WHERE {where_clause} AND j.embedding IS NOT NULL
-            ORDER BY similarity DESC
+            ORDER BY memory_rank(
+                (1 - (j.embedding <=> $1::vector))::float,
+                (CASE WHEN j.tsv @@ plainto_tsquery('english', $2)
+                      THEN ts_rank(j.tsv, plainto_tsquery('english', $2)) * 0.3
+                      ELSE 0.0 END)::float,
+                (EXTRACT(EPOCH FROM (NOW() - j.entry_date)) / 86400.0)::float
+            ) DESC
             LIMIT ${param_idx}
         """
         params.append(limit)

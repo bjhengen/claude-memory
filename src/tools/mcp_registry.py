@@ -500,8 +500,8 @@ async def find_mcp_tools(
         "t.embedding IS NOT NULL",
         "s.retired_at IS NULL"
     ]
-    params = [embedding_str]
-    param_idx = 2
+    params = [embedding_str, query]
+    param_idx = 3
     joins = ""
 
     if project:
@@ -532,7 +532,10 @@ async def find_mcp_tools(
         LEFT JOIN machines m ON s.machine_id = m.id
         {joins}
         WHERE {where_clause}
-        ORDER BY similarity DESC
+        ORDER BY (1 - (t.embedding <=> $1::vector)
+                  + CASE WHEN t.tsv @@ plainto_tsquery('english', $2)
+                         THEN ts_rank(t.tsv, plainto_tsquery('english', $2)) * 0.3
+                         ELSE 0.0 END) DESC
         LIMIT ${param_idx}
         """,
         *params
