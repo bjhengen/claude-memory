@@ -49,6 +49,34 @@ def decide_action(verdict: JudgeVerdict, config) -> RoutingAction:
     return RoutingAction.IGNORE
 
 
+async def pick_canonical(db, a_id: int, b_id: int) -> tuple[int, int]:
+    """
+    Choose which lesson survives a duplicate merge.
+
+    Rule: higher upvotes → longer content → newer learned_at (NULL sorts
+    oldest) → higher id. Returns (canonical_id, merged_id).
+
+    Comprehensiveness outranks age: retiring the newer-but-richer write-up
+    loses information the older duplicate doesn't have (lesson #1327 — the
+    old "older wins" tiebreak did exactly that).
+    """
+    rows = await db.fetch(
+        "SELECT id, COALESCE(upvotes, 0) AS upvotes, "
+        "COALESCE(length(content), 0) AS content_len, learned_at "
+        "FROM lessons WHERE id = ANY($1)",
+        [a_id, b_id],
+    )
+    if len(rows) != 2:
+        raise ValueError(f"expected 2 lessons for ids ({a_id}, {b_id}), got {len(rows)}")
+
+    def sort_key(r):
+        epoch = r["learned_at"].timestamp() if r["learned_at"] else float("-inf")
+        return (-r["upvotes"], -r["content_len"], -epoch, -r["id"])
+
+    ordered = sorted(rows, key=sort_key)
+    return ordered[0]["id"], ordered[1]["id"]
+
+
 import asyncpg
 
 

@@ -10,7 +10,7 @@ from src.consolidation import config
 from src.consolidation.candidates import find_candidates
 from src.consolidation.judge import adjudicate, JudgeVerdict
 from src.consolidation.actor import (
-    RoutingAction, decide_action,
+    RoutingAction, decide_action, pick_canonical,
     execute_auto_merge, execute_auto_supersede,
     execute_enqueue, execute_flag_conflict,
 )
@@ -117,8 +117,11 @@ async def consolidate_at_log(
         if action == RoutingAction.IGNORE:
             summary["action_taken"] = "ignored"
         elif action == RoutingAction.AUTO_MERGE:
+            canonical_id, merged_id = await pick_canonical(
+                pool, new_lesson_id, cand["id"],
+            )
             merge_id = await execute_auto_merge(
-                pool, new_lesson_id=new_lesson_id, canonical_id=cand["id"],
+                pool, new_lesson_id=merged_id, canonical_id=canonical_id,
                 verdict=verdict, cosine=float(cand["cosine"]),
                 judge_model=config.JUDGE_MODEL,
             )
