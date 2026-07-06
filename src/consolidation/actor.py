@@ -45,6 +45,7 @@ def decide_action(verdict: JudgeVerdict, config) -> RoutingAction:
             return RoutingAction.FLAG_CONFLICT
         return RoutingAction.IGNORE
 
+    # 'complement': both lessons are valid and additive — never merge/retire.
     return RoutingAction.IGNORE
 
 

@@ -105,7 +105,7 @@ def render_report(rows: list[dict[str, Any]], thresholds) -> tuple[str, dict[str
 
     # Confidence histogram per verdict (buckets of 0.1)
     histogram: dict[str, dict[str, int]] = {}
-    for verdict in ("duplicate", "supersedes", "contradicts", "unrelated"):
+    for verdict in ("duplicate", "supersedes", "complement", "contradicts", "unrelated"):
         buckets: Counter = Counter()
         for r in rows:
             if r["verdict"] != verdict:
@@ -140,7 +140,7 @@ def render_report(rows: list[dict[str, Any]], thresholds) -> tuple[str, dict[str
                 crossings["flag_conflict"] += 1
             else:
                 crossings["ignore"] += 1
-        else:  # unrelated
+        else:  # unrelated / complement — both non-actionable
             crossings["ignore"] += 1
 
     # Top-20 highest-confidence pairs (excluding unrelated)
@@ -174,14 +174,14 @@ def render_report(rows: list[dict[str, Any]], thresholds) -> tuple[str, dict[str
     lines.append("")
     lines.append("## Verdict distribution")
     lines.append("")
-    for v in ("duplicate", "supersedes", "contradicts", "unrelated"):
+    for v in ("duplicate", "supersedes", "complement", "contradicts", "unrelated"):
         n = verdict_counts.get(v, 0)
         pct = (n / total * 100) if total else 0
         lines.append(f"- **{v}**: {n} ({pct:.1f}%)")
     lines.append("")
     lines.append("## Confidence histogram")
     lines.append("")
-    for v in ("duplicate", "supersedes", "contradicts", "unrelated"):
+    for v in ("duplicate", "supersedes", "complement", "contradicts", "unrelated"):
         if not histogram.get(v):
             continue
         lines.append(f"### {v}")

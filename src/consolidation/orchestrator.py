@@ -30,8 +30,14 @@ async def _judge_pair(anthropic, new_title, new_content, cand):
 
 
 def _best_non_unrelated(pairs):
-    """Highest-confidence non-unrelated verdict; ties broken by higher cosine."""
-    scored = [(c, v) for c, v in pairs if v.relationship != "unrelated"]
+    """Highest-confidence actionable verdict; ties broken by higher cosine.
+
+    'complement' is non-actionable (both lessons stay), so it is skipped like
+    'unrelated' — a high-confidence complement must not shadow an actionable
+    duplicate/supersede/contradict from another candidate.
+    """
+    scored = [(c, v) for c, v in pairs
+              if v.relationship not in ("unrelated", "complement")]
     if not scored:
         return None
     scored.sort(key=lambda cv: (cv[1].confidence, cv[0].get("cosine", 0.0)), reverse=True)

@@ -1,4 +1,4 @@
-"""LLM judge: classifies a candidate pair as duplicate / supersedes / contradicts / unrelated."""
+"""LLM judge: classifies a candidate pair as duplicate / supersedes / complement / contradicts / unrelated."""
 
 import asyncio
 import json
@@ -11,7 +11,7 @@ from anthropic import AsyncAnthropic
 logger = logging.getLogger(__name__)
 
 
-Relationship = Literal["duplicate", "supersedes", "contradicts", "unrelated"]
+Relationship = Literal["duplicate", "supersedes", "complement", "contradicts", "unrelated"]
 Direction = Literal["new→existing", "existing→new"] | None
 
 
@@ -28,7 +28,7 @@ You classify the relationship between two short developer lessons.
 
 Given two lessons ("new" and "existing"), return ONLY a JSON object:
 {
-  "relationship": "duplicate" | "supersedes" | "contradicts" | "unrelated",
+  "relationship": "duplicate" | "supersedes" | "complement" | "contradicts" | "unrelated",
   "direction": "new→existing" | "existing→new" | null,
   "confidence": 0.0 to 1.0,
   "reasoning": "<one short sentence>"
@@ -36,11 +36,14 @@ Given two lessons ("new" and "existing"), return ONLY a JSON object:
 
 Rules:
 - "duplicate": both lessons convey substantively the same advice. direction=null.
-- "supersedes": one lesson makes the other obsolete (e.g., a newer workaround replaces an older one). direction is required: "new→existing" means new supersedes existing; "existing→new" means existing already covers new's claim.
+- "supersedes": one lesson makes the other OBSOLETE — following the old one would now be wrong or wasteful (e.g., a newer workaround replaces a broken one, a config value was corrected). direction is required: "new→existing" means new supersedes existing; "existing→new" means new adds nothing beyond what existing already says.
+- "complement": both lessons are individually true and independently useful; one adds detail, scope, a different aspect, or a further step on top of the other rather than replacing it. direction=null.
 - "contradicts": the lessons give opposite advice for the same situation without clearly superseding. direction=null.
 - "unrelated": different topics or only superficially similar.
 
-Be conservative: if in doubt, prefer "unrelated" with low confidence.
+Choosing between "supersedes" and "complement": ask "if someone followed ONLY the older lesson, would they be wrong?" If wrong → supersedes. If merely less informed → complement. Topical overlap alone is NEVER supersession; lessons about the same tool, project, or subsystem usually complement each other.
+
+Be conservative: if in doubt between supersedes and complement, prefer "complement"; if in doubt overall, prefer "unrelated" with low confidence.
 Output ONLY the JSON object — no prose, no code fences.
 """
 
@@ -68,7 +71,7 @@ def _parse(text: str) -> JudgeVerdict | None:
     try:
         data = json.loads(text.strip())
         rel = data["relationship"]
-        if rel not in ("duplicate", "supersedes", "contradicts", "unrelated"):
+        if rel not in ("duplicate", "supersedes", "complement", "contradicts", "unrelated"):
             return None
         direction = data.get("direction")
         if direction not in (None, "new→existing", "existing→new"):
