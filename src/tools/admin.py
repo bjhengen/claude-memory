@@ -33,25 +33,17 @@ async def update_project_state(
     if not project_id:
         return json.dumps({"error": f"Project '{project}' not found"})
 
-    # Build update
+    # Build update. SET clauses must reference the same fixed $1-$6 slots the
+    # VALUES list binds — dynamic renumbering here mis-assigns params on
+    # partial updates (lesson #1382).
     updates = []
-    params = [project_id]
-    param_idx = 2
 
     if current_focus is not None:
-        updates.append(f"current_focus = ${param_idx}")
-        params.append(current_focus)
-        param_idx += 1
-
+        updates.append("current_focus = $2")
     if blockers is not None:
-        updates.append(f"blockers = ${param_idx}")
-        params.append(blockers)
-        param_idx += 1
-
+        updates.append("blockers = $3")
     if next_steps is not None:
-        updates.append(f"next_steps = ${param_idx}")
-        params.append(next_steps)
-        param_idx += 1
+        updates.append("next_steps = $4")
 
     if not updates:
         return json.dumps({"error": "No updates provided"})
@@ -60,12 +52,8 @@ async def update_project_state(
 
     # Always stamp on every UPDATE (Pattern 3, last-writer-wins)
     source_agent, source_client_id = stamp()
-    updates.append(f"source_agent = ${param_idx}")
-    params.append(source_agent)
-    param_idx += 1
-    updates.append(f"source_client_id = ${param_idx}")
-    params.append(source_client_id)
-    param_idx += 1
+    updates.append("source_agent = $5")
+    updates.append("source_client_id = $6")
 
     await app.db.execute(
         f"""

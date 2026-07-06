@@ -80,9 +80,12 @@ async def test_contextvar_propagates_from_auth_to_tool():
     # 'spike-test-key' is hash-matched by resolve_identity.
     bearer = "spike-test-key"
     key_hash = hashlib.sha256(bearer.encode()).hexdigest()
+    # ON CONFLICT: a prior run that died before its finally-cleanup leaves
+    # this row behind; reclaim it instead of failing forever on residue.
     apikey_row = await test_pool.fetchrow(
         """INSERT INTO api_keys (api_key_hash, family, client_name, label, scopes)
            VALUES ($1, 'claude', 'spike', 'e2e-spike', ARRAY['read','write'])
+           ON CONFLICT (api_key_hash) DO UPDATE SET label = 'e2e-spike'
            RETURNING id""",
         key_hash,
     )
@@ -165,7 +168,13 @@ async def test_contextvar_propagates_from_auth_to_tool():
     finally:
         # Restore class method so we don't poison other tests in the suite.
         auth_module.MemoryOAuthProvider.load_access_token = original
-        await test_pool.execute("DELETE FROM api_keys WHERE id = $1", apikey_row["id"])
+        # The app lifespan shutdown closes the pool we injected into server
+        # state, so clean up over a fresh connection, not the closed pool.
+        conn = await asyncpg.connect(test_db_url)
+        try:
+            await conn.execute("DELETE FROM api_keys WHERE id = $1", apikey_row["id"])
+        finally:
+            await conn.close()
         # Detach the test pool from server-level state before closing it so a
         # later test that re-enters _ensure_pool() doesn't reuse a closed pool.
         server_module._db_pool = None
