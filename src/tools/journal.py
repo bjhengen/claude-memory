@@ -66,10 +66,16 @@ async def read_journal(
     project: str = None,
     limit: int = 10,
     source_agent: str = None,
+    full_content: bool = False,
     ctx: Context = None
 ) -> str:
     """
     Read journal entries. Can search semantically or filter by tags/project.
+
+    Returns ~500-char previews by default (entries are long-form; full text
+    for a default page can exceed MCP client token budgets). Entries clipped
+    this way have truncated=true — re-read with full_content=true for the
+    complete text.
 
     Args:
         query: Semantic search query (optional)
@@ -78,6 +84,7 @@ async def read_journal(
         limit: Maximum entries to return
         source_agent: Filter by agent family (e.g. 'claude', 'codex'). Default
             None returns the shared cross-agent corpus.
+        full_content: Return complete entry text instead of previews
     """
     app = ctx.request_context.lifespan_context
 
@@ -137,9 +144,15 @@ async def read_journal(
 
     entries = []
     for row in rows:
+        content = row["content"] or ""
+        truncated = False
+        if not full_content and len(content) > 500:
+            content = content[:500] + "…"
+            truncated = True
         entries.append({
             "id": row["id"],
-            "content": row["content"],
+            "content": content,
+            "truncated": truncated,
             "tags": row["tags"],
             "mood": row["mood"],
             "project": row.get("project_name"),
