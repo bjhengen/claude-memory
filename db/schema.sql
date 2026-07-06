@@ -2,8 +2,8 @@
 -- PostgreSQL 16 + pgvector
 --
 -- GENERATED FILE - do not hand-edit table definitions here.
--- Regenerated 2026-07-06 by applying the full migration chain to a fresh
--- database and dumping it:
+-- Regenerated 2026-07-06 (post-P1) by applying the full migration chain to a
+-- fresh database and dumping it:
 --   migrations/001_initial_schema.sql
 --   migrations/002_v2_features.sql
 --   migrations/003_v3_codified_context.sql
@@ -12,6 +12,8 @@
 --   db/migrations/v5_1_backlog_analysis.sql
 --   db/migrations/v5_oauth_persistence.sql
 --   db/migrations/v6_attribution.sql
+--   db/migrations/v7_complement_verdict.sql
+--   db/migrations/v8_client_last_seen.sql
 -- (db/migrations/001_add_journal.sql is a redundant IF-NOT-EXISTS predecessor
 --  of the journal table already created in 001_initial_schema.sql.)
 --
@@ -608,7 +610,7 @@ CREATE TABLE public.backlog_analysis (
     right_source_agent text,
     cross_agent boolean GENERATED ALWAYS AS ((left_source_agent IS DISTINCT FROM right_source_agent)) STORED,
     CONSTRAINT backlog_analysis_check CHECK ((lesson_a_id < lesson_b_id)),
-    CONSTRAINT backlog_analysis_verdict_check CHECK (((verdict)::text = ANY ((ARRAY['duplicate'::character varying, 'supersedes'::character varying, 'contradicts'::character varying, 'unrelated'::character varying])::text[])))
+    CONSTRAINT backlog_analysis_verdict_check CHECK (((verdict)::text = ANY ((ARRAY['duplicate'::character varying, 'supersedes'::character varying, 'complement'::character varying, 'contradicts'::character varying, 'unrelated'::character varying])::text[])))
 );
 
 
@@ -1175,7 +1177,8 @@ CREATE TABLE public.oauth_clients (
     token_endpoint_auth_method character varying(50) DEFAULT 'client_secret_post'::character varying,
     client_id_issued_at bigint,
     raw_data jsonb NOT NULL,
-    created_at timestamp without time zone DEFAULT now()
+    created_at timestamp without time zone DEFAULT now(),
+    last_seen_at timestamp without time zone
 );
 
 
