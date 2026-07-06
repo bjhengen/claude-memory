@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: claude
+          POSTGRES_PASSWORD: claude
+          POSTGRES_DB: claude_memory_test
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd "pg_isready -U claude -d claude_memory_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio pytest-mock
+
+      # db/schema.sql is the fresh-database bootstrap (same file compose
+      # mounts as the initdb script) — CI applying it keeps the generated
+      # schema honest against the code on every push.
+      - name: Apply schema
+        run: psql -v ON_ERROR_STOP=1 -f db/schema.sql
+        env:
+          PGHOST: localhost
+          PGPORT: "5434"
+          PGUSER: claude
+          PGPASSWORD: claude
+          PGDATABASE: claude_memory_test
+
+      - name: Run tests
+        run: python -m pytest tests/ -q
+        env:
+          TEST_DATABASE_URL: postgresql://claude:claude@localhost:5434/claude_memory_test

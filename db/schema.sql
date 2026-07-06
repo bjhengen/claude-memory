@@ -14,6 +14,7 @@
 --   db/migrations/v6_attribution.sql
 --   db/migrations/v7_complement_verdict.sql
 --   db/migrations/v8_client_last_seen.sql
+--   db/migrations/v9_recency_ranking.sql
 -- (db/migrations/001_add_journal.sql is a redundant IF-NOT-EXISTS predecessor
 --  of the journal table already created in 001_initial_schema.sql.)
 --
@@ -137,6 +138,18 @@ $$;
 
 
 --
+-- Name: memory_rank(double precision, double precision, double precision); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.memory_rank(similarity double precision, keyword_boost double precision, age_days double precision) RETURNS double precision
+    LANGUAGE sql IMMUTABLE
+    AS $$
+    SELECT (similarity + keyword_boost)
+           * (0.7 + 0.3 * exp(-GREATEST(COALESCE(age_days, 365.0), 0.0) / 180.0))
+$$;
+
+
+--
 -- Name: patterns_tsv_trigger(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -255,16 +268,16 @@ $$;
 
 
 --
--- Name: semantic_search(public.vector, text, integer); Type: FUNCTION; Schema: public; Owner: -
+-- Name: semantic_search(public.vector, text, integer, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.semantic_search(query_embedding public.vector, query_text text, search_limit integer DEFAULT 5) RETURNS TABLE(source_type text, source_id integer, title text, content text, similarity double precision, keyword_boost double precision, effective_score double precision, upvotes integer, downvotes integer)
+CREATE FUNCTION public.semantic_search(query_embedding public.vector, query_text text, search_limit integer DEFAULT 5, filter_source_agent text DEFAULT NULL::text) RETURNS TABLE(source_type text, source_id integer, title text, content text, similarity double precision, keyword_boost double precision, effective_score double precision, upvotes integer, downvotes integer)
     LANGUAGE plpgsql
     AS $$
 BEGIN
     RETURN QUERY
     SELECT * FROM (
-        -- Lessons: includes vote-based confidence scoring
+        -- Lessons
         SELECT
             'lesson'::TEXT AS source_type,
             l.id AS source_id,
@@ -276,103 +289,96 @@ BEGIN
                 THEN ts_rank(l.tsv, plainto_tsquery('english', query_text)) * 0.3
                 ELSE 0.0
             END)::FLOAT AS keyword_boost,
-            (
-                (1 - (l.embedding <=> query_embedding))
-                + (CASE
+            memory_rank(
+                (1 - (l.embedding <=> query_embedding))::FLOAT,
+                (CASE
                     WHEN l.tsv @@ plainto_tsquery('english', query_text)
                     THEN ts_rank(l.tsv, plainto_tsquery('english', query_text)) * 0.3
                     ELSE 0.0
-                END)
-            ) * (CASE
-                WHEN (l.upvotes + l.downvotes) > 0
-                THEN 0.5 + ((l.upvotes::FLOAT / (l.upvotes + l.downvotes)::FLOAT) * 0.5)
-                ELSE 1.0
-            END)::FLOAT AS effective_score,
+                END)::FLOAT,
+                (EXTRACT(EPOCH FROM (NOW() - l.learned_at)) / 86400.0)::FLOAT
+            )::FLOAT AS effective_score,
             l.upvotes AS upvotes,
             l.downvotes AS downvotes
         FROM lessons l
         WHERE l.embedding IS NOT NULL AND l.retired_at IS NULL
+          AND (filter_source_agent IS NULL OR l.source_agent = filter_source_agent)
 
         UNION ALL
 
         -- Patterns
         SELECT
-            'pattern'::TEXT AS source_type,
-            p.id AS source_id,
-            p.name::TEXT AS title,
-            p.problem::TEXT AS content,
-            (1 - (p.embedding <=> query_embedding))::FLOAT AS similarity,
+            'pattern'::TEXT, p.id, p.name::TEXT, p.problem::TEXT,
+            (1 - (p.embedding <=> query_embedding))::FLOAT,
             (CASE
                 WHEN p.tsv @@ plainto_tsquery('english', query_text)
                 THEN ts_rank(p.tsv, plainto_tsquery('english', query_text)) * 0.3
                 ELSE 0.0
-            END)::FLOAT AS keyword_boost,
-            (
-                (1 - (p.embedding <=> query_embedding))
-                + (CASE
+            END)::FLOAT,
+            memory_rank(
+                (1 - (p.embedding <=> query_embedding))::FLOAT,
+                (CASE
                     WHEN p.tsv @@ plainto_tsquery('english', query_text)
                     THEN ts_rank(p.tsv, plainto_tsquery('english', query_text)) * 0.3
                     ELSE 0.0
-                END)
-            )::FLOAT AS effective_score,
-            0 AS upvotes,
-            0 AS downvotes
+                END)::FLOAT,
+                (EXTRACT(EPOCH FROM (NOW() - p.created_at)) / 86400.0)::FLOAT
+            )::FLOAT,
+            0, 0
         FROM patterns p
         WHERE p.embedding IS NOT NULL
+          AND (filter_source_agent IS NULL OR p.source_agent = filter_source_agent)
 
         UNION ALL
 
         -- Sessions
         SELECT
-            'session'::TEXT AS source_type,
-            s.id AS source_id,
-            ('Session ' || s.id)::TEXT AS title,
-            s.summary::TEXT AS content,
-            (1 - (s.embedding <=> query_embedding))::FLOAT AS similarity,
+            'session'::TEXT, s.id, ('Session ' || s.id)::TEXT, s.summary::TEXT,
+            (1 - (s.embedding <=> query_embedding))::FLOAT,
             (CASE
                 WHEN s.tsv @@ plainto_tsquery('english', query_text)
                 THEN ts_rank(s.tsv, plainto_tsquery('english', query_text)) * 0.3
                 ELSE 0.0
-            END)::FLOAT AS keyword_boost,
-            (
-                (1 - (s.embedding <=> query_embedding))
-                + (CASE
+            END)::FLOAT,
+            memory_rank(
+                (1 - (s.embedding <=> query_embedding))::FLOAT,
+                (CASE
                     WHEN s.tsv @@ plainto_tsquery('english', query_text)
                     THEN ts_rank(s.tsv, plainto_tsquery('english', query_text)) * 0.3
                     ELSE 0.0
-                END)
-            )::FLOAT AS effective_score,
-            0 AS upvotes,
-            0 AS downvotes
+                END)::FLOAT,
+                (EXTRACT(EPOCH FROM (NOW() - COALESCE(s.ended_at, s.started_at))) / 86400.0)::FLOAT
+            )::FLOAT,
+            0, 0
         FROM sessions s
         WHERE s.embedding IS NOT NULL
+          AND (filter_source_agent IS NULL OR s.source_agent = filter_source_agent)
 
         UNION ALL
 
         -- Journal
         SELECT
-            'journal'::TEXT AS source_type,
-            j.id AS source_id,
-            ('Journal ' || to_char(j.entry_date, 'YYYY-MM-DD'))::TEXT AS title,
-            j.content::TEXT AS content,
-            (1 - (j.embedding <=> query_embedding))::FLOAT AS similarity,
+            'journal'::TEXT, j.id,
+            ('Journal ' || to_char(j.entry_date, 'YYYY-MM-DD'))::TEXT, j.content::TEXT,
+            (1 - (j.embedding <=> query_embedding))::FLOAT,
             (CASE
                 WHEN j.tsv @@ plainto_tsquery('english', query_text)
                 THEN ts_rank(j.tsv, plainto_tsquery('english', query_text)) * 0.3
                 ELSE 0.0
-            END)::FLOAT AS keyword_boost,
-            (
-                (1 - (j.embedding <=> query_embedding))
-                + (CASE
+            END)::FLOAT,
+            memory_rank(
+                (1 - (j.embedding <=> query_embedding))::FLOAT,
+                (CASE
                     WHEN j.tsv @@ plainto_tsquery('english', query_text)
                     THEN ts_rank(j.tsv, plainto_tsquery('english', query_text)) * 0.3
                     ELSE 0.0
-                END)
-            )::FLOAT AS effective_score,
-            0 AS upvotes,
-            0 AS downvotes
+                END)::FLOAT,
+                (EXTRACT(EPOCH FROM (NOW() - j.entry_date)) / 86400.0)::FLOAT
+            )::FLOAT,
+            0, 0
         FROM journal j
         WHERE j.embedding IS NOT NULL
+          AND (filter_source_agent IS NULL OR j.source_agent = filter_source_agent)
     ) combined
     ORDER BY effective_score DESC
     LIMIT search_limit;
