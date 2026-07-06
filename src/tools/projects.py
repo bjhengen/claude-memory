@@ -61,9 +61,12 @@ async def get_project(name: str, ctx: Context = None) -> str:
         project_id
     )
 
-    # Get current state
+    # Get current state; age computed DB-side so it can't drift from the
+    # timestamps the server itself wrote.
     state = await app.db.fetchrow(
-        "SELECT * FROM project_state WHERE project_id = $1",
+        """SELECT *, floor(EXTRACT(EPOCH FROM (NOW() - updated_at)) / 86400)::int
+                    AS state_age_days
+           FROM project_state WHERE project_id = $1""",
         project_id
     )
 
@@ -104,9 +107,18 @@ async def get_project(name: str, ctx: Context = None) -> str:
             for f in key_files
         ],
         "state": {
-            "current_focus": state["current_focus"] if state else None,
-            "blockers": state["blockers"] if state else [],
-            "next_steps": state["next_steps"] if state else []
+            "current_focus": state["current_focus"],
+            "blockers": state["blockers"],
+            "next_steps": state["next_steps"],
+            "state_updated_at": state["updated_at"].isoformat()
+                if state["updated_at"] else None,
+            "state_age_days": state["state_age_days"],
+            "staleness_warning": (
+                f"project state last updated {state['state_age_days']} days ago — "
+                "verify against reality before relying on current_focus/next_steps"
+                if state["state_age_days"] is not None
+                and state["state_age_days"] >= 14 else None
+            ),
         } if state else None,
         "guardrails": [
             {
