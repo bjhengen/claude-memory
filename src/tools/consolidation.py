@@ -117,6 +117,8 @@ async def approve_consolidation(
         queue_id: ID of the consolidation_queue entry to approve
         reviewer: Who is approving (for audit trail)
     """
+    from src.identity import require_admin
+    require_admin()
     app = ctx.request_context.lifespan_context
 
     q = await app.db.fetchrow(
@@ -208,6 +210,8 @@ async def reject_consolidation(
         reason: Optional explanation
         reviewer: Who is rejecting
     """
+    from src.identity import require_admin
+    require_admin()
     app = ctx.request_context.lifespan_context
 
     q = await app.db.fetchrow("SELECT * FROM consolidation_queue WHERE id=$1", queue_id)
@@ -406,6 +410,8 @@ async def undo_consolidation(
         reason: Required — why this is being reversed
         reviewer: Who is reversing
     """
+    from src.identity import require_admin
+    require_admin()
     if not reason or not reason.strip():
         return json.dumps({"error": "reason is required for undo_consolidation"})
 

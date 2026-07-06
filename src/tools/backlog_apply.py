@@ -139,6 +139,8 @@ async def apply_backlog_batch(
         max_apply: Cap on pairs applied per call (default 50)
         reviewer: Required when confirm=true; recorded as decided_by in lesson_merges
     """
+    from src.identity import require_admin
+    require_admin()
     if verdict_in is None:
         verdict_in = ["duplicate", "supersedes"]
 
