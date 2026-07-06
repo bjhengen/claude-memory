@@ -51,7 +51,7 @@ It has run in production as the author's daily driver since early 2026, accumula
 - **Python 3.11** MCP server built on **FastMCP**, served over HTTP
 - **OpenAI `text-embedding-ada-002`** for embeddings
 - **Docker Compose** behind nginx
-- **57 MCP tools** across 14 functional modules
+- **58 MCP tools** across 14 functional modules
 
 ### Multi-agent identity (v6)
 
@@ -62,7 +62,7 @@ Authentication resolves a caller to an identity in this order:
 
 Every write tool stamps `source_agent` (e.g. `claude`, `codex`) and `source_client_id` onto the row. Shared-metadata writes are last-writer-wins; owned-content updates/retires enforce **rule-b** (an agent may only mutate its own content unless it holds `admin` scope). Cross-agent pairs are skipped by the consolidation pipeline, so two agents writing in different voices on the same topic are never silently merged.
 
-## The 57 tools
+## The 58 tools
 
 Grouped by surface (full table below):
 
@@ -76,10 +76,10 @@ Grouped by surface (full table below):
 | **Codified context (v3)** | agent specs, spec documents, MCP server/tool registry, `suggest_agent` |
 | **Feedback (v4)** | `annotate`/`get_annotations`/`clear_annotation` |
 | **Consolidation (v5)** | review queue, conflict handling, `undo_consolidation`, `get_consolidation_stats` |
-| **Admin & access (v6)** | `check_guardrails`, `get_permissions`, `list_clients` |
+| **Admin & access (v6)** | `check_guardrails`, `get_permissions`, `list_clients`, `get_client_health` |
 
 <details>
-<summary><b>Full tool reference (all 57)</b></summary>
+<summary><b>Full tool reference (all 58)</b></summary>
 
 ### Search & retrieval
 | Tool | Description |
@@ -157,6 +157,7 @@ Grouped by surface (full table below):
 | `check_guardrails` | Verify safety before risky operations |
 | `get_permissions` | Get permissions for a scope |
 | `list_clients` | List registered agent clients *(admin scope)* |
+| `get_client_health` | Per-client last-seen / staleness view (no admin needed) |
 
 </details>
 
@@ -214,7 +215,7 @@ claude-memory/
 │   ├── identity.py      v6 identity resolver (api_keys / OAuth)
 │   ├── auth.py          OAuth provider + token validation
 │   ├── consolidation/   v5 consolidation pipeline
-│   └── tools/           14 tool modules, 57 MCP tools
+│   └── tools/           14 tool modules, 58 MCP tools
 ├── tests/         pytest suite (identity, rule-b, migration, …)
 ├── deploy.sh · docker-compose.yml · Dockerfile · nginx-snippet.conf
 ```

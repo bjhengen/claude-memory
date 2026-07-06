@@ -102,6 +102,13 @@ async def resolve_identity(pool: asyncpg.Pool, bearer: str) -> Optional[Identity
         oauth_client_id = row["client_id"]
         client_name = row["client_name"]
 
+        # Touch last_seen_at (same pattern as the api_keys branch) so a
+        # client/launch context going dark is detectable via get_client_health.
+        await pool.execute(
+            "UPDATE oauth_clients SET last_seen_at = NOW() WHERE client_id = $1",
+            oauth_client_id,
+        )
+
         family_row = await pool.fetchrow(
             "SELECT family FROM oauth_client_family WHERE client_id = $1",
             oauth_client_id,

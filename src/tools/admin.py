@@ -342,3 +342,62 @@ async def list_clients(ctx: Context = None) -> str:
         })
 
     return json.dumps({"clients": out})
+
+
+@mcp.tool()
+async def get_client_health(stale_days: int = 7, ctx: Context = None) -> str:
+    """
+    Per-client last-seen health across both auth paths (api_keys + OAuth).
+
+    Lets any session notice a client or launch context that has gone dark —
+    e.g. a machine whose registration silently vanished. No admin scope
+    required; returns no secrets. A client with last_seen_at NULL has never
+    been seen since tracking began and is reported stale.
+
+    Args:
+        stale_days: Days without activity before a client is flagged stale (default 7)
+    """
+    app = ctx.request_context.lifespan_context
+
+    rows = await app.db.fetch(
+        """
+        SELECT 'apikey:' || id AS client_id, family,
+               COALESCE(label, client_name) AS name, 'apikey' AS source,
+               last_seen_at,
+               floor(EXTRACT(EPOCH FROM (NOW() - last_seen_at)) / 86400)::int
+                   AS days_since_seen
+        FROM api_keys WHERE revoked_at IS NULL
+        UNION ALL
+        SELECT 'oauth:' || c.client_id, COALESCE(f.family, 'unknown'),
+               c.client_name, 'oauth', c.last_seen_at,
+               floor(EXTRACT(EPOCH FROM (NOW() - c.last_seen_at)) / 86400)::int
+        FROM oauth_clients c
+        LEFT JOIN oauth_client_family f ON f.client_id = c.client_id
+        WHERE c.last_seen_at IS NOT NULL
+        ORDER BY last_seen_at DESC NULLS LAST
+        """
+    )
+    never_seen_oauth = await app.db.fetchval(
+        "SELECT count(*) FROM oauth_clients WHERE last_seen_at IS NULL"
+    )
+
+    clients = [
+        {
+            "client_id": r["client_id"],
+            "source": r["source"],
+            "family": r["family"],
+            "name": r["name"],
+            "last_seen_at": r["last_seen_at"].isoformat() if r["last_seen_at"] else None,
+            "days_since_seen": r["days_since_seen"],
+            "stale": r["days_since_seen"] is None or r["days_since_seen"] >= stale_days,
+        }
+        for r in rows
+    ]
+    return json.dumps({
+        "clients": clients,
+        "stale_days": stale_days,
+        "stale_count": sum(1 for c in clients if c["stale"]),
+        # OAuth rows predating last-seen tracking (column added v8); they
+        # only start reporting once seen again.
+        "never_seen_oauth_clients": never_seen_oauth,
+    })
