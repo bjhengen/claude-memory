@@ -1,7 +1,12 @@
 # Claude Memory MCP Server Dependencies
 
-# MCP SDK (updated to latest stable)
-mcp>=1.26.0
+# MCP SDK. Capped below 2.0.0: mcp 2.x renamed FastMCP to MCPServer and moved it
+# out of mcp.server.fastmcp, so `from mcp.server.fastmcp import FastMCP` in
+# src/server.py raises ModuleNotFoundError. The cap is what keeps an unpinned
+# rebuild from shipping a container that cannot import its own entrypoint.
+# Lift it only together with the MCPServer migration:
+# https://py.sdk.modelcontextprotocol.io/v2/migration/#fastmcp-renamed-to-mcpserver
+mcp>=1.26.0,<2.0.0
 
 # Database
 asyncpg>=0.29.0
