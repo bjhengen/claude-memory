@@ -1,5 +1,8 @@
-# Environment files (contain secrets)
+# Environment files (contain secrets). The glob also covers editor/manual
+# backups like .env.bak, which carry real keys but were not matched by ".env".
 .env
+.env.*
+!.env.example
 
 # Git worktrees
 .worktrees/

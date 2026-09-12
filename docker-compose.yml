@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   db:
     image: pgvector/pgvector:pg16
@@ -29,7 +27,11 @@ services:
     environment:
       DATABASE_URL: postgresql://claude:${POSTGRES_PASSWORD:-changeme}@db:5432/claude_memory
       # LLM API keys — supply via shell env / your secrets manager in prod.
-      # No default: compose errors loudly if the shell env doesn't supply these (intentional).
+      # WARNING: bare ${VAR} does NOT error when unset; compose warns and
+      # substitutes an EMPTY STRING, so a hand-run `docker compose up -d` here
+      # boots a healthy-looking server whose every embedding/judge call fails.
+      # Deploy through deploy.sh (which exports these via the host's secrets
+      # hook and then verifies both are non-empty in PID1) — never by hand.
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       # Public host the server is served under (behind nginx/TLS). Set in prod env.

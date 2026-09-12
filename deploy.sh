@@ -1,29 +1,49 @@
 #!/bin/bash
-# Deploy Claude Memory to a remote host over SSH (rsync + safe container swap).
+# Deploy Claude Memory to a remote host over SSH (rsync + compose recreate).
 #
-# The remote docker-compose (v1) recreate path is broken against newer Docker
-# engines (ContainerConfig KeyError) and takes the db container down with it.
-# This script therefore never runs compose on the remote: it builds the new
-# image first, then swaps ONLY the mcp container with plain `docker run`,
-# health-checks it, and rolls back to the previous container on failure.
-# The db container is never touched.
+# The remote container must stay owned by its compose project. An earlier
+# version of this script swapped the mcp container with a plain `docker run`,
+# which left it un-owned: the next secrets-manager rollout then failed with
+# "container name already in use" AFTER the new secret had been written,
+# leaving the parameter store ahead of the running container.
+#
+# So this script never creates containers itself. It ships code, then hands
+# off to the host's deploy hook (a secrets-manager wrapper that exports the
+# app's secrets and runs `docker compose up -d --build`), falling back to
+# plain compose when no hook is configured.
+#
+# IMPORTANT: the hook must run as the docker-capable user WITHOUT sudo —
+# compose v2 is a per-user CLI plugin and `sudo docker compose` is not found.
 
 set -euo pipefail
 
 # Configuration — provide these via the environment (e.g. an untracked .deploy.env you source).
-#   EC2_HOST    SSH target, e.g. ubuntu@your-ec2-host
-#   SSH_KEY     path to your private key, e.g. ~/.ssh/your-key.pem
-#   REMOTE_DIR  deploy directory on the host (defaults below)
+#   EC2_HOST     SSH target, e.g. ubuntu@your-ec2-host
+#   SSH_KEY      path to your private key, e.g. ~/.ssh/your-key.pem
+#   REMOTE_DIR   deploy directory on the host (defaults below)
 EC2_HOST="${EC2_HOST:?set EC2_HOST, e.g. ubuntu@your-ec2-host}"
 SSH_KEY="${SSH_KEY:?set SSH_KEY, e.g. ~/.ssh/your-key.pem}"
 REMOTE_DIR="${REMOTE_DIR:-/home/ubuntu/claude-memory}"
 
-# Container topology — matches docker-compose.yml (compose prefixes the
-# network with its project name, i.e. the remote directory basename).
+# Optional deploy hook on the remote host. When set, it is invoked as
+# `FRSECRETS_REBUILD=1 <hook> <APP_NAME>` and is expected to export the app's
+# secrets from your secrets manager and then run compose. When unset, this
+# script runs `docker compose up -d --build` directly (secrets must then come
+# from the remote .env).
+REMOTE_DEPLOY_HOOK="${REMOTE_DEPLOY_HOOK:-}"
+APP_NAME="${APP_NAME:-claude_memory}"
+
+# Variables owned by the secrets manager rather than .env. When a deploy hook
+# is configured these are STRIPPED from the .env we ship, so the hook's export
+# is the single source of truth on the remote and a stale local copy can never
+# shadow it.
+SECRET_MANAGED_VARS="${SECRET_MANAGED_VARS:-OPENAI_API_KEY ANTHROPIC_API_KEY}"
+
 MCP_CONTAINER="${MCP_CONTAINER:-claude_memory_mcp}"
-IMAGE_TAG="${IMAGE_TAG:-claude-memory-mcp}"
-DOCKER_NETWORK="${DOCKER_NETWORK:-claude-memory_claude_memory_net}"
+ROLLBACK_TAG="${ROLLBACK_TAG:-claude-memory-mcp:rollback}"
 HOST_PORT="${HOST_PORT:-8004}"
+
+ssh_run() { ssh -i "$SSH_KEY" "$EC2_HOST" "$@"; }
 
 echo "=== Claude Memory Deployment ==="
 
@@ -32,66 +52,57 @@ if [ ! -f .env ]; then
     exit 1
 fi
 
-echo "1. Creating remote directory..."
-ssh -i "$SSH_KEY" "$EC2_HOST" "mkdir -p $REMOTE_DIR"
+echo "1. Pre-flight checks..."
+ssh_run "mkdir -p $REMOTE_DIR"
+
+# A changed POSTGRES_PASSWORD would rewrite DATABASE_URL while the existing
+# database volume still holds the old password — the app would boot and fail
+# every query. Compare hashes, never values.
+local_pw_hash=$(grep -E '^POSTGRES_PASSWORD=' .env | head -1 | cut -d= -f2- | shasum | cut -c1-12)
+remote_pw_hash=$(ssh_run "grep -E '^POSTGRES_PASSWORD=' $REMOTE_DIR/.env 2>/dev/null | head -1 | cut -d= -f2- | shasum | cut -c1-12" || true)
+if [ -n "$remote_pw_hash" ] && [ "$local_pw_hash" != "$remote_pw_hash" ]; then
+    echo "   ERROR: local POSTGRES_PASSWORD differs from the remote one."
+    echo "   Shipping it would break DATABASE_URL against the existing db volume. Aborting."
+    exit 1
+fi
+echo "   POSTGRES_PASSWORD matches remote (or remote has none yet)."
+
+# Tag the currently-running image so a manual rollback stays possible.
+ssh_run "if docker inspect $MCP_CONTAINER >/dev/null 2>&1; then \
+    docker tag \$(docker inspect $MCP_CONTAINER --format '{{.Image}}') $ROLLBACK_TAG && \
+    echo '   Tagged running image as $ROLLBACK_TAG'; \
+  else echo '   No running container to tag (first deploy?)'; fi"
 
 echo "2. Uploading files..."
 rsync -az --delete --exclude='__pycache__' -e "ssh -i $SSH_KEY" src/ "$EC2_HOST:$REMOTE_DIR/src/"
 rsync -az --delete --exclude='__pycache__' -e "ssh -i $SSH_KEY" db/ "$EC2_HOST:$REMOTE_DIR/db/"
 rsync -az --exclude='__pycache__' -e "ssh -i $SSH_KEY" scripts/ "$EC2_HOST:$REMOTE_DIR/scripts/"
-rsync -az -e "ssh -i $SSH_KEY" docker-compose.yml Dockerfile requirements.txt .env "$EC2_HOST:$REMOTE_DIR/"
+rsync -az -e "ssh -i $SSH_KEY" docker-compose.yml Dockerfile requirements.txt "$EC2_HOST:$REMOTE_DIR/"
 
-echo "3. Building image on remote (old container keeps serving during build)..."
-ssh -i "$SSH_KEY" "$EC2_HOST" "docker build -t $IMAGE_TAG $REMOTE_DIR"
+# Ship .env, minus anything the secrets manager owns.
+env_to_ship=.env
+if [ -n "$REMOTE_DEPLOY_HOOK" ]; then
+    env_to_ship=$(mktemp)
+    trap 'rm -f "$env_to_ship"' EXIT
+    filter=$(printf '%s\n' $SECRET_MANAGED_VARS | paste -sd'|' -)
+    grep -vE "^(${filter})=" .env > "$env_to_ship"
+    echo "   .env filtered for upload (secrets-manager vars withheld: $SECRET_MANAGED_VARS)"
+fi
+rsync -az -e "ssh -i $SSH_KEY" "$env_to_ship" "$EC2_HOST:$REMOTE_DIR/.env"
 
-echo "4. Swapping mcp container (db is never touched)..."
-ssh -i "$SSH_KEY" "$EC2_HOST" \
-    "MCP_CONTAINER=$MCP_CONTAINER IMAGE_TAG=$IMAGE_TAG DOCKER_NETWORK=$DOCKER_NETWORK HOST_PORT=$HOST_PORT REMOTE_DIR=$REMOTE_DIR bash -s" <<'REMOTE'
-set -eo pipefail
-cd "$REMOTE_DIR"
-
-old_id=$(docker ps -aq -f name="^${MCP_CONTAINER}$")
-
-# Runtime-only secrets (e.g. SSM-injected at provision time) live in the
-# running container, not in .env — carry them across the swap. Explicit -e
-# flags override --env-file values.
-EXTRA_ENV=()
-if [ -n "$old_id" ]; then
-    for var in DATABASE_URL OPENAI_API_KEY ANTHROPIC_API_KEY; do
-        val=$(docker exec "$MCP_CONTAINER" printenv "$var" 2>/dev/null || true)
-        if [ -n "$val" ]; then
-            EXTRA_ENV+=("-e" "$var=$val")
-        fi
-    done
+echo "3. Deploying (build happens first; a build failure leaves the old container serving)..."
+if [ -n "$REMOTE_DEPLOY_HOOK" ]; then
+    echo "   via deploy hook: $REMOTE_DEPLOY_HOOK $APP_NAME"
+    ssh_run "FRSECRETS_REBUILD=1 $REMOTE_DEPLOY_HOOK $APP_NAME"
+else
+    echo "   via plain compose (no deploy hook configured)"
+    ssh_run "cd $REMOTE_DIR && docker compose up -d --build"
 fi
 
-# Refuse to swap into a container with no LLM keys: a silent empty fetch here
-# would boot a server that fails on every embedding/judge call.
-for required in OPENAI_API_KEY ANTHROPIC_API_KEY; do
-    if ! printf '%s\n' "${EXTRA_ENV[@]}" | grep -q "^${required}=" \
-        && ! grep -q "^${required}=." .env; then
-        echo "ERROR: $required found neither in the running container nor in .env — aborting before swap."
-        exit 1
-    fi
-done
-
-if [ -n "$old_id" ]; then
-    docker rename "$MCP_CONTAINER" "${MCP_CONTAINER}_old"
-    docker stop "${MCP_CONTAINER}_old" >/dev/null
-fi
-
-docker run -d --name "$MCP_CONTAINER" \
-    --network "$DOCKER_NETWORK" \
-    -p "127.0.0.1:${HOST_PORT}:8003" \
-    --restart unless-stopped \
-    --env-file .env \
-    "${EXTRA_ENV[@]}" \
-    "$IMAGE_TAG" >/dev/null
-
-echo "   Waiting for health check..."
+echo "4. Health check..."
 healthy=""
 for _ in $(seq 1 15); do
-    if curl -sf "http://127.0.0.1:${HOST_PORT}/health" >/dev/null 2>&1; then
+    if ssh_run "curl -sf http://127.0.0.1:${HOST_PORT}/health >/dev/null 2>&1"; then
         healthy=1
         break
     fi
@@ -99,41 +110,34 @@ for _ in $(seq 1 15); do
 done
 
 if [ -z "$healthy" ]; then
-    echo "   Health check FAILED — rolling back to previous container."
-    docker logs "$MCP_CONTAINER" --tail 30 || true
-    docker stop "$MCP_CONTAINER" >/dev/null || true
-    docker rm "$MCP_CONTAINER" >/dev/null || true
-    if [ -n "$old_id" ]; then
-        docker rename "${MCP_CONTAINER}_old" "$MCP_CONTAINER"
-        docker start "$MCP_CONTAINER" >/dev/null
-        echo "   Previous container restored."
-    fi
+    echo "   HEALTH CHECK FAILED."
+    ssh_run "docker logs $MCP_CONTAINER --tail 30" || true
+    echo
+    echo "   The old image is tagged $ROLLBACK_TAG. To roll back on the host:"
+    echo "     docker tag $ROLLBACK_TAG \$(cd $REMOTE_DIR && docker compose config --images | tail -1)"
+    echo "     cd $REMOTE_DIR && docker compose up -d --force-recreate --no-build mcp"
     exit 1
 fi
-
-if [ -n "$old_id" ]; then
-    docker rm "${MCP_CONTAINER}_old" >/dev/null
-fi
 echo "   Healthy."
-REMOTE
 
-echo "5. Container status..."
-ssh -i "$SSH_KEY" "$EC2_HOST" "docker ps --filter name=claude_memory --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'"
+echo "5. Verifying secrets actually reached the container..."
+# Exported != injected: compose only passes variables DECLARED in the service's
+# environment: block, and a no-op `up -d` would leave old code running. Read
+# PID1's environment rather than trusting the deploy command's exit code.
+missing=$(ssh_run "docker exec $MCP_CONTAINER sh -c 'tr \"\\0\" \"\\n\" < /proc/1/environ' \
+    | awk -F= '/^(OPENAI_API_KEY|ANTHROPIC_API_KEY|DATABASE_URL)=/ { if (length(\$2) == 0) print \$1 }
+               END {}'" || true)
+present=$(ssh_run "docker exec $MCP_CONTAINER sh -c 'tr \"\\0\" \"\\n\" < /proc/1/environ' \
+    | grep -cE '^(OPENAI_API_KEY|ANTHROPIC_API_KEY|DATABASE_URL)=.'" || echo 0)
+if [ -n "$missing" ] || [ "$present" -lt 3 ]; then
+    echo "   ERROR: required env vars are empty or absent in the container: ${missing:-<not all three present>}"
+    echo "   The container is serving but will fail on embedding/judge calls. Investigate before relying on it."
+    exit 1
+fi
+echo "   OPENAI_API_KEY, ANTHROPIC_API_KEY, DATABASE_URL all non-empty in PID1."
 
-echo ""
-echo "=== Deployment Complete ==="
-echo ""
-echo "The MCP server is running at: http://localhost:${HOST_PORT}/mcp (on the host)"
-echo ""
-echo "To expose via nginx, add the following to your nginx config:"
-echo ""
-echo "  location /claude-memory/ {"
-echo "      proxy_pass http://127.0.0.1:${HOST_PORT}/;"
-echo "      proxy_http_version 1.1;"
-echo "      proxy_set_header Upgrade \$http_upgrade;"
-echo "      proxy_set_header Connection 'upgrade';"
-echo "      proxy_set_header Host \$host;"
-echo "      proxy_set_header X-Real-IP \$remote_addr;"
-echo "  }"
-echo ""
-echo "Then reload nginx: sudo nginx -t && sudo systemctl reload nginx"
+echo "6. Container state:"
+ssh_run "docker ps --filter name=claude_memory --format '   {{.Names}}\t{{.Status}}'"
+
+echo
+echo "=== Deployment complete ==="
