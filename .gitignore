@@ -51,3 +51,7 @@ backups/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local working notes holding personal context. This repo is PUBLIC — keep
+# anything with real names, roles or infrastructure detail out of it.
+claude-legacy-memory.md
