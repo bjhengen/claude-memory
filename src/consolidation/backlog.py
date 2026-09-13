@@ -7,7 +7,7 @@ from typing import Any
 import asyncpg
 from anthropic import AsyncAnthropic
 
-from src.consolidation.judge import adjudicate
+from src.consolidation.judge import adjudicate, demote_additive_supersede
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +66,10 @@ async def judge_and_record(
         candidate_title=pair["b_title"], candidate_content=pair["b_content"],
         model=judge_model, timeout=timeout,
     )
+    # Same correction as the log-time path: a 'supersedes' whose reasoning
+    # describes addition is a complement. Applied here too so backlog analysis
+    # and log-time consolidation report the same verdict for the same pair.
+    verdict = demote_additive_supersede(verdict)
     try:
         await pool.execute(
             """

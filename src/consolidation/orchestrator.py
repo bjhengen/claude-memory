@@ -9,7 +9,7 @@ from anthropic import AsyncAnthropic
 
 from src.consolidation import config
 from src.consolidation.candidates import find_candidates
-from src.consolidation.judge import adjudicate, JudgeVerdict
+from src.consolidation.judge import adjudicate, demote_additive_supersede, JudgeVerdict
 from src.consolidation.actor import (
     RoutingAction, decide_action, pick_canonical,
     execute_auto_merge, execute_auto_supersede,
@@ -27,7 +27,21 @@ async def _judge_pair(anthropic, new_title, new_content, cand):
         candidate_title=cand["title"], candidate_content=cand["content"],
         model=config.JUDGE_MODEL, timeout=config.JUDGE_TIMEOUT_SECONDS,
     )
-    return cand, verdict
+    # The judge over-fires 'supersedes' on additive pairs while describing the
+    # addition in its own reasoning. Demote before routing, so the correction
+    # applies to auto-apply AND enqueue alike (v7 only fixed auto-apply).
+    demoted = demote_additive_supersede(verdict)
+    if demoted.relationship != verdict.relationship:
+        logger.info(
+            "judge demoted supersedes→complement for candidate %s: %s",
+            cand.get("id"), verdict.reasoning,
+        )
+        # Mark the candidate so the caller can report the demotion. Backtesting
+        # put this rule at 87% precision, so roughly one demotion in eight is a
+        # pair a human would have approved — it must stay visible rather than
+        # vanishing into a log nobody reads.
+        cand = {**cand, "_demoted_from_supersedes": True}
+    return cand, demoted
 
 
 def _best_non_unrelated(pairs):
@@ -102,11 +116,19 @@ async def consolidate_at_log(
         return {"action_taken": "ignored", "reason": "judge_error",
                 "candidate_count": len(cands), "best_verdict": None, "confidence": None}
 
+    demoted_ids = [c["id"] for c, _ in pairs if c.get("_demoted_from_supersedes")]
+
     best = _best_non_unrelated(pairs)
     if best is None:
-        return {"action_taken": "ignored", "reason": "all_unrelated",
-                "candidate_count": len(cands), "best_verdict": "unrelated",
-                "confidence": None}
+        out = {"action_taken": "ignored", "reason": "all_unrelated",
+               "candidate_count": len(cands), "best_verdict": "unrelated",
+               "confidence": None}
+        if demoted_ids:
+            # The common shape: the only actionable verdict was an additive
+            # supersede, so nothing is left to act on. Say so explicitly.
+            out["reason"] = "additive_supersede_demoted"
+            out["demoted_candidates"] = demoted_ids
+        return out
 
     cand, verdict = best
     action = decide_action(verdict, config)
@@ -115,6 +137,8 @@ async def consolidate_at_log(
         "best_verdict": verdict.relationship, "confidence": verdict.confidence,
         "merge_id": None, "queue_id": None, "conflict_id": None,
     }
+    if demoted_ids:
+        summary["demoted_candidates"] = demoted_ids
 
     try:
         if action == RoutingAction.IGNORE:

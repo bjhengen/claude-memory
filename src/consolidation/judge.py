@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import Literal
 
@@ -46,6 +47,62 @@ Choosing between "supersedes" and "complement": ask "if someone followed ONLY th
 Be conservative: if in doubt between supersedes and complement, prefer "complement"; if in doubt overall, prefer "unrelated" with low confidence.
 Output ONLY the JSON object — no prose, no code fences.
 """
+
+
+# Words that describe ADDING to a lesson rather than replacing it. When the
+# judge labels a pair 'supersedes' but its own reasoning uses one of these, the
+# label contradicts the explanation and the explanation is the reliable half.
+#
+# Derived from the 2026-09-12 queue review: of 19 pending proposals, 16 were
+# rejected and at least 5 announced themselves with exactly these phrases while
+# still labelled 'supersedes' at ~0.92 confidence. See lessons #1327 and #2049.
+#
+# Deliberately excludes 'adds nothing' and similar, which describe the
+# existing→new direction where the new lesson really is redundant.
+_ADDITIVE_TELLS = (
+    r"\badds?\b(?!\s+nothing)",
+    r"\badditional\b",
+    r"\balso\s+(?:covers|adds|includes|documents)\b",
+    r"\bextends?\b",
+    r"\bexpands?\b",
+    r"\bgeneral[iz]s?es\b",
+    r"\bgeneralizes\b",
+    r"\bcompanion\b",
+    r"\bbeyond\s+(?:what|the)\b",
+    r"\bdoes\s+not\s+(?:address|cover|mention)\b",
+    r"\bdo\s+not\s+address\b",
+)
+# NOT included, deliberately: "more complete". Backtested over all 68 decided
+# queue entries it split 1 rejected / 1 approved — a coin flip, so it adds
+# noise without adding signal. Re-measure before adding any new tell.
+
+_ADDITIVE_RE = re.compile("|".join(_ADDITIVE_TELLS), re.IGNORECASE)
+
+_DEMOTION_MARKER = "[auto-demoted supersedes→complement: reasoning describes addition, not obsolescence]"
+
+
+def demote_additive_supersede(verdict: JudgeVerdict) -> JudgeVerdict:
+    """Reclassify a 'supersedes' whose own reasoning describes addition.
+
+    A true supersede means following the OLD lesson would now be wrong. When
+    the judge's stated reason is that the new lesson *adds* something the old
+    one lacks, both lessons are individually true and the old one must not be
+    retired — that is 'complement' by the taxonomy's own definition.
+
+    Returns the verdict unchanged unless it is a 'supersedes' carrying an
+    additive tell. Idempotent: an already-demoted verdict is a 'complement'
+    and is returned untouched.
+    """
+    if verdict.relationship != "supersedes":
+        return verdict
+    if not _ADDITIVE_RE.search(verdict.reasoning or ""):
+        return verdict
+    return JudgeVerdict(
+        relationship="complement",
+        direction=None,
+        confidence=verdict.confidence,
+        reasoning=f"{_DEMOTION_MARKER} {verdict.reasoning}",
+    )
 
 
 def _build_user_prompt(new_title: str, new_content: str,

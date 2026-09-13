@@ -135,6 +135,9 @@ async def execute_auto_merge(
 
             # Already merged (e.g. by a concurrent call or a retry): return
             # the existing audit row instead of double-transferring counters.
+            # This is checked FIRST so an idempotent replay still succeeds even
+            # if canonical was retired after the original merge — the work is
+            # already done and there is nothing left to corrupt.
             if new["retired_at"] is not None:
                 existing = await conn.fetchrow(
                     "SELECT id FROM lesson_merges "
@@ -146,6 +149,21 @@ async def execute_auto_merge(
                 raise ValueError(
                     f"lesson {new_lesson_id} is retired but has no merge row "
                     f"into {canonical_id}"
+                )
+
+            # The canonical side must still be live. A queue entry judged weeks
+            # ago can be approved after its canonical lesson was retired by
+            # another merge or a manual retire — merging into a tombstone buries
+            # the surviving content where nothing reads it.
+            canonical = await conn.fetchrow(
+                "SELECT retired_at FROM lessons WHERE id=$1", canonical_id,
+            )
+            if canonical is None:
+                raise ValueError(f"canonical lesson {canonical_id} not found")
+            if canonical["retired_at"] is not None:
+                raise ValueError(
+                    f"canonical lesson {canonical_id} is retired; refusing to "
+                    f"merge {new_lesson_id} into it"
                 )
 
             new_up = new["upvotes"] or 0
@@ -255,11 +273,31 @@ async def execute_auto_supersede(
     async with pool.acquire() as conn:
         async with conn.transaction():
             existing = await conn.fetchrow(
-                "SELECT upvotes, downvotes, tags FROM lessons WHERE id=$1",
+                "SELECT upvotes, downvotes, tags, retired_at FROM lessons WHERE id=$1",
                 existing_lesson_id,
             )
             if existing is None:
                 raise ValueError(f"existing lesson {existing_lesson_id} not found")
+            if existing["retired_at"] is not None:
+                raise ValueError(
+                    f"existing lesson {existing_lesson_id} is already retired; "
+                    f"nothing to supersede"
+                )
+
+            # The survivor must still be live. This is the queue-50 shape: a
+            # pending new→existing entry whose NEW lesson was retired after
+            # enqueue. Proceeding would retire the one live lesson of the pair
+            # in favour of a tombstone, losing both.
+            survivor = await conn.fetchrow(
+                "SELECT retired_at FROM lessons WHERE id=$1", new_lesson_id,
+            )
+            if survivor is None:
+                raise ValueError(f"new lesson {new_lesson_id} not found")
+            if survivor["retired_at"] is not None:
+                raise ValueError(
+                    f"new lesson {new_lesson_id} is retired; refusing to "
+                    f"supersede live lesson {existing_lesson_id} with it"
+                )
             ex_up = existing["upvotes"] or 0
             ex_down = existing["downvotes"] or 0
 
