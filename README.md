@@ -189,7 +189,39 @@ python -m src.server                    # MCP server on :8003
 EC2_HOST=ubuntu@your-host SSH_KEY=~/.ssh/your-key.pem ./deploy.sh
 ```
 
-`deploy.sh` syncs the project and rebuilds the containers. In production the server sits behind nginx, and `PUBLIC_HOST` is added to the transport-security (DNS-rebinding) allowlist — see `nginx-snippet.conf`. The base schema is `db/schema.sql`; versioned migrations live in `db/migrations/` and apply in order.
+Settings are read from the environment, so it is usually easier to keep them in
+an untracked `.deploy.env` and `source` it first:
+
+```bash
+export EC2_HOST=ubuntu@your-host
+export SSH_KEY=~/.ssh/your-key.pem
+export REMOTE_DIR=/home/ubuntu/claude-memory
+
+# Optional but recommended: a secrets-manager hook on the remote host. It is
+# invoked as `<hook> <APP_NAME>` and is expected to export the app's secrets
+# and then run compose.
+export REMOTE_DEPLOY_HOOK=/home/ubuntu/scripts/your-secrets-deploy.sh
+export APP_NAME=claude_memory
+```
+
+`deploy.sh` rsyncs the project, then rebuilds and recreates **only** the `mcp`
+container **through compose** — it never creates containers itself, so the
+container stays owned by its compose project. It refuses to start if the local
+and remote `POSTGRES_PASSWORD` disagree, tags the outgoing image for rollback,
+health-checks the new container, and finally verifies the required secrets are
+actually non-empty in PID 1 (exported is not injected).
+
+When `REMOTE_DEPLOY_HOOK` is set, the keys named in `SECRET_MANAGED_VARS`
+(default `OPENAI_API_KEY ANTHROPIC_API_KEY`) are **stripped from the `.env` that
+gets shipped**, so the secrets manager stays the single source of truth and a
+stale local copy cannot shadow it. With no hook configured, the script falls
+back to plain `docker compose up -d --build` and those keys must be present in
+the remote `.env`.
+
+In production the server sits behind nginx, and `PUBLIC_HOST` is added to the
+transport-security (DNS-rebinding) allowlist — see `nginx-snippet.conf`. The
+base schema is `db/schema.sql`; versioned migrations live in `db/migrations/`
+and apply in order.
 
 ### 4. Issue a per-machine token and connect a client
 
