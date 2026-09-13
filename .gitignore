@@ -4,6 +4,10 @@
 .env.*
 !.env.example
 
+# Deploy target config: host, key path, secrets-hook path. No credentials, but
+# it is the infrastructure topology this repo was scrubbed of — keep it out.
+.deploy.env
+
 # Git worktrees
 .worktrees/
 
