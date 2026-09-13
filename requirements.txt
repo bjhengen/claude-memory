@@ -8,16 +8,23 @@
 # https://py.sdk.modelcontextprotocol.io/v2/migration/#fastmcp-renamed-to-mcpserver
 mcp>=1.26.0,<2.0.0
 
-# Database
-asyncpg>=0.29.0
-pgvector>=0.2.0
+# Every direct dependency is capped below its next major. An open range does not
+# break when upstream publishes — it breaks at the next `pip install`, which for
+# this repo is a Docker image build, i.e. mid-deploy. See the mcp note above.
+# Caps below match the majors prod is actually running and CI actually tests.
 
-# OpenAI for embeddings
-openai>=1.0.0
+# Database
+asyncpg>=0.29.0,<1.0.0
+pgvector>=0.2.0,<1.0.0
+
+# OpenAI for embeddings. Prod runs 2.x; 3.0.0 is out and untested here, so the
+# cap holds the line at the major this code was written against.
+openai>=1.0.0,<3.0.0
 
 # ASGI server
-uvicorn>=0.30.0
+uvicorn>=0.30.0,<1.0.0
 starlette>=0.40.0,<1.0.0  # 1.0.0 dropped on_event() — pin until server migrates to lifespan
 
-# Anthropic SDK for consolidation judge (v5)
-anthropic>=0.40.0
+# Anthropic SDK for consolidation judge (v5). Prod runs 0.x; 1.0.0 is released
+# and unverified against this code path, so stay on 0.x until it is.
+anthropic>=0.40.0,<1.0.0
