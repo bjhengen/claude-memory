@@ -37,22 +37,30 @@ def _make_request(headers: dict, client) -> Request:
     return Request(scope)
 
 
-def test_client_ip_trusts_x_real_ip_only_from_loopback_peer():
-    # nginx (the loopback proxy) sets X-Real-IP to the true remote addr.
+def test_client_ip_trusts_x_real_ip_from_loopback_peer():
     req = _make_request({"x-real-ip": "203.0.113.7"}, ("127.0.0.1", 5000))
     assert _client_ip(req) == "203.0.113.7"
 
 
-def test_client_ip_ignores_x_real_ip_from_non_loopback_peer():
-    # A spoofed X-Real-IP from a non-proxy peer must be ignored (rate-limit
-    # evasion defense): fall back to the real peer.
-    req = _make_request({"x-real-ip": "1.2.3.4"}, ("198.51.100.9", 5000))
-    assert _client_ip(req) == "198.51.100.9"
+def test_client_ip_trusts_x_real_ip_from_docker_bridge_gateway():
+    # Published 127.0.0.1 port => the container sees the private bridge gateway
+    # as the peer, not loopback. X-Real-IP (set by nginx) must still be trusted,
+    # else every client collapses into one rate-limit bucket.
+    req = _make_request({"x-real-ip": "203.0.113.7"}, ("172.18.0.1", 5000))
+    assert _client_ip(req) == "203.0.113.7"
+
+
+def test_client_ip_ignores_x_real_ip_from_public_peer():
+    # A public peer means the app was reached without nginx; a spoofed X-Real-IP
+    # there must be ignored (rate-limit evasion defense). 8.8.8.8 is genuinely
+    # public (unlike the RFC 5737 doc ranges, which Python treats as private).
+    req = _make_request({"x-real-ip": "1.2.3.4"}, ("8.8.8.8", 5000))
+    assert _client_ip(req) == "8.8.8.8"
 
 
 def test_client_ip_falls_back_to_peer_without_header():
-    req = _make_request({}, ("127.0.0.1", 5000))
-    assert _client_ip(req) == "127.0.0.1"
+    req = _make_request({}, ("172.18.0.1", 5000))
+    assert _client_ip(req) == "172.18.0.1"
 
 PASSPHRASE = "open-sesame-correct-horse"
 COOKIE_SECRET = "z" * 64
@@ -199,6 +207,32 @@ async def test_authorize_purges_expired_pending_entries():
     )
     await provider.authorize(client, params)
     assert "stale" not in provider._pending_auth
+
+
+@pytest.mark.asyncio
+async def test_valid_cookie_bypasses_rate_limit():
+    """A remembered browser must authorize even when its IP is rate-limited —
+    an attacker's failed attempts can't lock out the legit user."""
+    ip = "203.0.113.50"
+    async with await _client() as client:
+        for _ in range(10):  # trip the limiter for this IP
+            rid = _seed_pending()
+            await client.post("/approve", data={"id": rid, "passphrase": "wrong"},
+                              headers={"X-Real-IP": ip})
+        # sanity: a passphrase attempt from that IP is now blocked
+        rid = _seed_pending()
+        blocked = await client.post("/approve", data={"id": rid, "passphrase": PASSPHRASE},
+                                    headers={"X-Real-IP": ip})
+    assert blocked.status_code == 429
+
+    rid = _seed_pending()
+    token = approve_gate.make_cookie()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url=BASE_URL,
+        follow_redirects=False, cookies={approve_gate.COOKIE_NAME: token},
+    ) as client:
+        resp = await client.post("/approve", data={"id": rid}, headers={"X-Real-IP": ip})
+    assert resp.status_code == 302, resp.text
 
 
 @pytest.mark.asyncio

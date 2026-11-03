@@ -6,6 +6,7 @@ Provides structured storage and semantic search across lessons, patterns, and pr
 """
 
 import html
+import ipaddress
 import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -91,12 +92,28 @@ _APPROVE_HEADERS = {
 }
 
 
+def _peer_is_trusted_proxy(peer: str) -> bool:
+    """Whether X-Real-IP from this peer may be trusted.
+
+    The app's only published ingress is nginx on the host loopback; because that
+    port is published on 127.0.0.1, Docker's userland proxy relays it and the
+    container sees the *private bridge gateway* as the peer, not loopback. So we
+    trust loopback and private-range peers (the controlled compose network) but
+    never a public peer — a public peer would mean the app was exposed without
+    nginx, where a client could forge the header to evade rate limiting.
+    """
+    try:
+        ip = ipaddress.ip_address(peer)
+    except ValueError:
+        return False
+    return ip.is_loopback or ip.is_private
+
+
 def _client_ip(request: "Request") -> str:
-    """Client IP for rate-limiting. X-Real-IP is only trusted when the peer is
-    the loopback reverse proxy (nginx sets it to the true remote addr); a
-    direct, non-proxy peer could otherwise spoof it to evade the limiter."""
+    """Client IP for rate-limiting, from nginx's X-Real-IP when the peer is a
+    trusted proxy, else the raw peer."""
     peer = request.client.host if request.client else "unknown"
-    if peer in ("127.0.0.1", "::1"):
+    if _peer_is_trusted_proxy(peer):
         xri = request.headers.get("x-real-ip")
         if xri:
             return xri.strip()
@@ -250,34 +267,31 @@ async def approve_authorization(request: Request):
             return HTMLResponse("<h1>Missing request ID</h1>", status_code=400,
                                 headers=_APPROVE_HEADERS)
 
-        client_ip = _client_ip(request)
-        if not _approve_rate_limiter.allowed(client_ip):
-            logger.warning("Rate-limited /approve attempts from %s", client_ip)
-            return HTMLResponse(
-                "<h1>Too many attempts</h1><p>Try again later.</p>",
-                status_code=429,
-                headers=_APPROVE_HEADERS,
-            )
-
         # Authorize if this browser is remembered, else require the passphrase.
-        remembered = approve_gate.verify_cookie(request.cookies.get(approve_gate.COOKIE_NAME))
+        # The remembered-cookie check runs BEFORE the rate limiter, so an
+        # attacker's failed attempts can never lock out a remembered browser.
         set_cookie = False
-        if remembered:
-            authorized = True
-        elif approve_gate.verify_passphrase(form.get("passphrase")):
-            authorized = True
-            set_cookie = True
+        if approve_gate.verify_cookie(request.cookies.get(approve_gate.COOKIE_NAME)):
+            pass  # remembered → authorized, skip the limiter entirely
         else:
-            authorized = False
-
-        if not authorized:
-            _approve_rate_limiter.record_failure(client_ip)
-            logger.warning("Rejected /approve (bad/missing passphrase) from %s", client_ip)
-            return HTMLResponse(
-                "<h1>Authorization denied</h1><p>Incorrect or missing passphrase.</p>",
-                status_code=403,
-                headers=_APPROVE_HEADERS,
-            )
+            client_ip = _client_ip(request)
+            if not _approve_rate_limiter.allowed(client_ip):
+                logger.warning("Rate-limited /approve attempts from %s", client_ip)
+                return HTMLResponse(
+                    "<h1>Too many attempts</h1><p>Try again later.</p>",
+                    status_code=429,
+                    headers=_APPROVE_HEADERS,
+                )
+            if approve_gate.verify_passphrase(form.get("passphrase")):
+                set_cookie = True
+            else:
+                _approve_rate_limiter.record_failure(client_ip)
+                logger.warning("Rejected /approve (bad/missing passphrase) from %s", client_ip)
+                return HTMLResponse(
+                    "<h1>Authorization denied</h1><p>Incorrect or missing passphrase.</p>",
+                    status_code=403,
+                    headers=_APPROVE_HEADERS,
+                )
 
         try:
             redirect_url = await oauth_provider.approve_authorization(str(request_id))
