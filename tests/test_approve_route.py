@@ -23,7 +23,7 @@ from mcp.server.auth.provider import AuthorizationParams  # noqa: E402
 from mcp.shared.auth import OAuthClientInformationFull  # noqa: E402
 
 from src import approve_gate  # noqa: E402
-from src.server import app, oauth_provider  # noqa: E402
+from src.server import app, oauth_provider, _approve_rate_limiter  # noqa: E402
 
 PASSPHRASE = "open-sesame-correct-horse"
 COOKIE_SECRET = "z" * 64
@@ -64,9 +64,11 @@ def _gate_env(monkeypatch):
     monkeypatch.setenv("APPROVE_COOKIE_SECRET", COOKIE_SECRET)
     oauth_provider._auth_codes.clear()
     oauth_provider._pending_auth.clear()
+    _approve_rate_limiter._hits.clear()
     yield
     oauth_provider._auth_codes.clear()
     oauth_provider._pending_auth.clear()
+    _approve_rate_limiter._hits.clear()
 
 
 async def _client():
