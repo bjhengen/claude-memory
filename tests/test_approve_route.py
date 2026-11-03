@@ -30,17 +30,23 @@ COOKIE_SECRET = "z" * 64
 BASE_URL = "http://localhost:8003"
 
 
-def _seed_pending(request_id: str = "test-req-id") -> str:
+def _seed_pending(
+    request_id: str = "test-req-id",
+    client_name: str | None = None,
+    redirect: str = "https://example.com/callback",
+    scopes: list[str] | None = None,
+) -> str:
     """Register an in-memory pending authorization and return its id."""
     client = OAuthClientInformationFull(
         client_id="client_test",
-        redirect_uris=["https://example.com/callback"],
+        client_name=client_name,
+        redirect_uris=[redirect],
     )
     params = AuthorizationParams(
         state="xyz",
-        scopes=["read", "write"],
+        scopes=scopes if scopes is not None else ["read", "write"],
         code_challenge="challenge",
-        redirect_uri="https://example.com/callback",
+        redirect_uri=redirect,
         redirect_uri_provided_explicitly=True,
     )
     import time
@@ -69,6 +75,25 @@ async def _client():
         base_url=BASE_URL,
         follow_redirects=False,
     )
+
+
+@pytest.mark.asyncio
+async def test_consent_page_shows_what_is_being_approved_escaped():
+    """Finding 1: the human must see the client, redirect, and scopes they are
+    authorizing — HTML-escaped — and the page must be unframeable (clickjacking)."""
+    rid = _seed_pending(
+        client_name="Evil <script>Corp</script>",
+        redirect="https://attacker.example/callback",
+        scopes=["read", "write"],
+    )
+    async with await _client() as client:
+        resp = await client.get(f"/approve?id={rid}")
+    body = resp.text
+    assert "attacker.example" in body, "redirect_uri not shown"
+    assert "read" in body and "write" in body, "scopes not shown"
+    assert "Evil" in body
+    assert "<script>Corp</script>" not in body, "client_name not HTML-escaped"
+    assert resp.headers.get("x-frame-options") == "DENY", "approve page is frameable"
 
 
 @pytest.mark.asyncio

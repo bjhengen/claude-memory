@@ -137,7 +137,16 @@ if [ -n "$missing" ] || [ "$present" -lt 5 ]; then
     echo "   Ensure both approve_* params exist under the app's SSM path, then redeploy."
     exit 1
 fi
-echo "   OPENAI_API_KEY, ANTHROPIC_API_KEY, DATABASE_URL, APPROVE_PASSPHRASE, APPROVE_COOKIE_SECRET all non-empty in PID1."
+# Also reject the known placeholder/sample secrets: non-empty but useless, and
+# the app would fail the /approve gate closed on them.
+placeholder=$(ssh_run "docker exec $MCP_CONTAINER sh -c 'tr \"\\0\" \"\\n\" < /proc/1/environ' \
+    | grep -E '^(APPROVE_PASSPHRASE|APPROVE_COOKIE_SECRET)=(choose-a-strong-passphrase|run-openssl-rand-hex-32|changeme)\$'" || true)
+if [ -n "$placeholder" ]; then
+    echo "   ERROR: placeholder value(s) in use: $placeholder"
+    echo "   Set real APPROVE_* secrets in the SSM path, then redeploy."
+    exit 1
+fi
+echo "   OPENAI_API_KEY, ANTHROPIC_API_KEY, DATABASE_URL, APPROVE_PASSPHRASE, APPROVE_COOKIE_SECRET all non-empty (and not placeholders) in PID1."
 
 echo "6. Container state:"
 ssh_run "docker ps --filter name=claude_memory --format '   {{.Names}}\t{{.Status}}'"

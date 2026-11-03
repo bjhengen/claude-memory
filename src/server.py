@@ -5,6 +5,7 @@ A persistent memory system for Claude Code sessions.
 Provides structured storage and semantic search across lessons, patterns, and project context.
 """
 
+import html
 import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -83,6 +84,12 @@ oauth_provider = MemoryOAuthProvider()
 # per-process — fine for the single-replica MCP server.
 _approve_rate_limiter = approve_gate.RateLimiter(max_attempts=10, window=900)
 
+# The /approve page must not be framed (clickjacking the one-click button).
+_APPROVE_HEADERS = {
+    "X-Frame-Options": "DENY",
+    "Content-Security-Policy": "frame-ancestors 'none'",
+}
+
 
 def _client_ip(request: "Request") -> str:
     """Best-effort client IP. Prefer the headers nginx sets, since the app sees
@@ -147,7 +154,25 @@ async def approve_authorization(request: Request):
             return HTMLResponse(
                 "<h1>Invalid or expired authorization request</h1>",
                 status_code=400,
+                headers=_APPROVE_HEADERS,
             )
+
+        # Show what is being authorized so the human can refuse an unexpected
+        # client or redirect (confused-deputy defense). All values are
+        # client-supplied, so escape them and label them as self-asserted.
+        pending = oauth_provider._pending_auth[request_id]
+        _client = pending["client"]
+        _params = pending["params"]
+        _name = html.escape(_client.client_name or "(unnamed client)")
+        _redirect = html.escape(str(_params.redirect_uri))
+        _scopes = html.escape(" ".join(_params.scopes or []) or "(none)")
+        details_html = (
+            '<div class="details">'
+            f"<div><span>Application</span><code>{_name}</code></div>"
+            f"<div><span>Redirects to</span><code>{_redirect}</code></div>"
+            f"<div><span>Scopes</span><code>{_scopes}</code></div>"
+            "</div>"
+        )
 
         # A browser that has passed the passphrase recently skips re-typing it.
         remembered = approve_gate.verify_cookie(request.cookies.get(approve_gate.COOKIE_NAME))
@@ -156,7 +181,7 @@ async def approve_authorization(request: Request):
             'autofocus required autocomplete="current-password">'
         )
 
-        html = f"""<!DOCTYPE html>
+        page = f"""<!DOCTYPE html>
 <html>
 <head>
     <title>Authorize - Claude Memory</title>
@@ -187,28 +212,38 @@ async def approve_authorization(request: Request):
             margin-bottom: 0.75rem; border: 1px solid #d1d5db;
             border-radius: 10px; font-size: 1rem;
         }}
+        .details {{
+            text-align: left; background: #f8f9fb; border: 1px solid #e5e7eb;
+            border-radius: 10px; padding: 0.9rem 1rem; margin-bottom: 1.25rem;
+            font-size: 0.9rem;
+        }}
+        .details div {{ display: flex; justify-content: space-between; gap: 1rem; margin: 0.25rem 0; }}
+        .details span {{ color: #6b7280; }}
+        .details code {{ color: #1a1a2e; word-break: break-all; text-align: right; }}
     </style>
 </head>
 <body>
     <div class="card">
         <div class="icon">&#129302;</div>
         <h1>Claude Memory</h1>
-        <p>An application is requesting access to your memory server.</p>
+        <p>An application is requesting access to your memory server. Confirm these details before authorizing.</p>
+        {details_html}
         <form method="POST">
-            <input type="hidden" name="id" value="{request_id}">
+            <input type="hidden" name="id" value="{html.escape(request_id)}">
             {passphrase_field}
             <button type="submit">Authorize Access</button>
         </form>
     </div>
 </body>
 </html>"""
-        return HTMLResponse(html)
+        return HTMLResponse(page, headers=_APPROVE_HEADERS)
 
     else:  # POST
         form = await request.form()
         request_id = form.get("id")
         if not request_id:
-            return HTMLResponse("<h1>Missing request ID</h1>", status_code=400)
+            return HTMLResponse("<h1>Missing request ID</h1>", status_code=400,
+                                headers=_APPROVE_HEADERS)
 
         client_ip = _client_ip(request)
         if not _approve_rate_limiter.allowed(client_ip):
@@ -216,6 +251,7 @@ async def approve_authorization(request: Request):
             return HTMLResponse(
                 "<h1>Too many attempts</h1><p>Try again later.</p>",
                 status_code=429,
+                headers=_APPROVE_HEADERS,
             )
 
         # Authorize if this browser is remembered, else require the passphrase.
@@ -235,14 +271,16 @@ async def approve_authorization(request: Request):
             return HTMLResponse(
                 "<h1>Authorization denied</h1><p>Incorrect or missing passphrase.</p>",
                 status_code=403,
+                headers=_APPROVE_HEADERS,
             )
 
         try:
             redirect_url = await oauth_provider.approve_authorization(str(request_id))
         except ValueError as e:
-            return HTMLResponse(f"<h1>{str(e)}</h1>", status_code=400)
+            return HTMLResponse(f"<h1>{html.escape(str(e))}</h1>", status_code=400,
+                                headers=_APPROVE_HEADERS)
 
-        response = RedirectResponse(url=redirect_url, status_code=302)
+        response = RedirectResponse(url=redirect_url, status_code=302, headers=_APPROVE_HEADERS)
         if set_cookie:
             token = approve_gate.make_cookie()
             if token:
