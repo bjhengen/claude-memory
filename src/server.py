@@ -92,15 +92,15 @@ _APPROVE_HEADERS = {
 
 
 def _client_ip(request: "Request") -> str:
-    """Best-effort client IP. Prefer the headers nginx sets, since the app sees
-    127.0.0.1 behind the reverse proxy."""
-    xri = request.headers.get("x-real-ip")
-    if xri:
-        return xri.strip()
-    xff = request.headers.get("x-forwarded-for")
-    if xff:
-        return xff.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+    """Client IP for rate-limiting. X-Real-IP is only trusted when the peer is
+    the loopback reverse proxy (nginx sets it to the true remote addr); a
+    direct, non-proxy peer could otherwise spoof it to evade the limiter."""
+    peer = request.client.host if request.client else "unknown"
+    if peer in ("127.0.0.1", "::1"):
+        xri = request.headers.get("x-real-ip")
+        if xri:
+            return xri.strip()
+    return peer
 
 # Configure OAuth auth settings
 auth_settings = AuthSettings(
@@ -158,19 +158,24 @@ async def approve_authorization(request: Request):
             )
 
         # Show what is being authorized so the human can refuse an unexpected
-        # client or redirect (confused-deputy defense). All values are
-        # client-supplied, so escape them and label them as self-asserted.
+        # client or redirect (confused-deputy defense). The redirect host is the
+        # security-relevant identifier and goes first; the client name is
+        # attacker-controllable, so it's escaped and labeled unverified. Scopes
+        # are NOT shown as requested — every OAuth token is granted full
+        # non-admin read+write regardless (see identity.py), so we state the
+        # real grant instead of the client's (meaningless) requested scopes.
         pending = oauth_provider._pending_auth[request_id]
         _client = pending["client"]
         _params = pending["params"]
         _name = html.escape(_client.client_name or "(unnamed client)")
         _redirect = html.escape(str(_params.redirect_uri))
-        _scopes = html.escape(" ".join(_params.scopes or []) or "(none)")
         details_html = (
             '<div class="details">'
-            f"<div><span>Application</span><code>{_name}</code></div>"
             f"<div><span>Redirects to</span><code>{_redirect}</code></div>"
-            f"<div><span>Scopes</span><code>{_scopes}</code></div>"
+            f"<div><span>Application</span><code>{_name} "
+            "<em>(self-reported, unverified)</em></code></div>"
+            "<div><span>Grants</span><code>Full read and write access "
+            "(non-admin)</code></div>"
             "</div>"
         )
 

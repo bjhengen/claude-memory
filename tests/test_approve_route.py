@@ -22,8 +22,37 @@ os.environ.setdefault("ANTHROPIC_API_KEY", "sk-dummy")
 from mcp.server.auth.provider import AuthorizationParams  # noqa: E402
 from mcp.shared.auth import OAuthClientInformationFull  # noqa: E402
 
+from starlette.requests import Request  # noqa: E402
+
 from src import approve_gate  # noqa: E402
-from src.server import app, oauth_provider, _approve_rate_limiter  # noqa: E402
+from src.server import app, oauth_provider, _approve_rate_limiter, _client_ip  # noqa: E402
+
+
+def _make_request(headers: dict, client) -> Request:
+    scope = {
+        "type": "http",
+        "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
+        "client": client,
+    }
+    return Request(scope)
+
+
+def test_client_ip_trusts_x_real_ip_only_from_loopback_peer():
+    # nginx (the loopback proxy) sets X-Real-IP to the true remote addr.
+    req = _make_request({"x-real-ip": "203.0.113.7"}, ("127.0.0.1", 5000))
+    assert _client_ip(req) == "203.0.113.7"
+
+
+def test_client_ip_ignores_x_real_ip_from_non_loopback_peer():
+    # A spoofed X-Real-IP from a non-proxy peer must be ignored (rate-limit
+    # evasion defense): fall back to the real peer.
+    req = _make_request({"x-real-ip": "1.2.3.4"}, ("198.51.100.9", 5000))
+    assert _client_ip(req) == "198.51.100.9"
+
+
+def test_client_ip_falls_back_to_peer_without_header():
+    req = _make_request({}, ("127.0.0.1", 5000))
+    assert _client_ip(req) == "127.0.0.1"
 
 PASSPHRASE = "open-sesame-correct-horse"
 COOKIE_SECRET = "z" * 64
@@ -83,18 +112,22 @@ async def _client():
 async def test_consent_page_shows_what_is_being_approved_escaped():
     """Finding 1: the human must see the client, redirect, and scopes they are
     authorizing — HTML-escaped — and the page must be unframeable (clickjacking)."""
+    # Client requests read-only, but the grant is always full read+write; the
+    # page must state the real grant, not echo the client's requested scopes.
     rid = _seed_pending(
         client_name="Evil <script>Corp</script>",
         redirect="https://attacker.example/callback",
-        scopes=["read", "write"],
+        scopes=["read"],
     )
     async with await _client() as client:
         resp = await client.get(f"/approve?id={rid}")
-    body = resp.text
+    body = resp.text.lower()
     assert "attacker.example" in body, "redirect_uri not shown"
-    assert "read" in body and "write" in body, "scopes not shown"
-    assert "Evil" in body
-    assert "<script>Corp</script>" not in body, "client_name not HTML-escaped"
+    assert "non-admin" in body, "honest grant statement (full read/write) not shown"
+    assert "write" in body, "grant does not mention write access"
+    assert "unverified" in body, "client name not labeled as self-reported/unverified"
+    assert "evil" in body
+    assert "<script>corp</script>" not in body, "client_name not HTML-escaped"
     assert resp.headers.get("x-frame-options") == "DENY", "approve page is frameable"
 
 
