@@ -106,11 +106,18 @@ class MemoryOAuthProvider:
     async def authorize(
         self, client: OAuthClientInformationFull, params: AuthorizationParams
     ) -> str:
+        now = time.time()
+        # Drop stale pending requests so the dict can't grow unbounded from
+        # /authorize spam. Entries are rejected past 600s anyway (approve_authorization).
+        self._pending_auth = {
+            rid: p for rid, p in self._pending_auth.items()
+            if now - p["created_at"] <= 600
+        }
         request_id = secrets.token_hex(16)
         self._pending_auth[request_id] = {
             "client": client,
             "params": params,
-            "created_at": time.time(),
+            "created_at": now,
         }
         return f"{ISSUER_URL}/approve?id={request_id}"
 

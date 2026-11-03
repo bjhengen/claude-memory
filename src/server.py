@@ -20,6 +20,7 @@ from starlette.responses import JSONResponse, PlainTextResponse, HTMLResponse, R
 
 from src.config import DATABASE_URL, OPENAI_API_KEY, ISSUER_URL, security_settings
 from src.auth import MemoryOAuthProvider
+from src import approve_gate
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -78,6 +79,22 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
 # Create OAuth provider
 oauth_provider = MemoryOAuthProvider()
 
+# Rate limiter for failed /approve attempts, keyed by client IP. In-memory and
+# per-process — fine for the single-replica MCP server.
+_approve_rate_limiter = approve_gate.RateLimiter(max_attempts=10, window=900)
+
+
+def _client_ip(request: "Request") -> str:
+    """Best-effort client IP. Prefer the headers nginx sets, since the app sees
+    127.0.0.1 behind the reverse proxy."""
+    xri = request.headers.get("x-real-ip")
+    if xri:
+        return xri.strip()
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
 # Configure OAuth auth settings
 auth_settings = AuthSettings(
     issuer_url=ISSUER_URL,
@@ -118,7 +135,12 @@ async def ready_check(request: Request) -> PlainTextResponse:
 
 @mcp.custom_route("/approve", methods=["GET", "POST"])
 async def approve_authorization(request: Request):
-    """OAuth authorization approval page."""
+    """OAuth authorization approval page, gated by a passphrase.
+
+    A POST here issues an auth code (exchangeable for a read/write token), so it
+    must prove the human: either a valid remember-this-browser cookie or the
+    correct passphrase. See src/approve_gate.py.
+    """
     if request.method == "GET":
         request_id = request.query_params.get("id")
         if not request_id or request_id not in oauth_provider._pending_auth:
@@ -126,6 +148,13 @@ async def approve_authorization(request: Request):
                 "<h1>Invalid or expired authorization request</h1>",
                 status_code=400,
             )
+
+        # A browser that has passed the passphrase recently skips re-typing it.
+        remembered = approve_gate.verify_cookie(request.cookies.get(approve_gate.COOKIE_NAME))
+        passphrase_field = "" if remembered else (
+            '<input type="password" name="passphrase" placeholder="Passphrase" '
+            'autofocus required autocomplete="current-password">'
+        )
 
         html = f"""<!DOCTYPE html>
 <html>
@@ -153,6 +182,11 @@ async def approve_authorization(request: Request):
             transition: background 0.2s;
         }}
         button:hover {{ background: #4f46e5; }}
+        input[type=password] {{
+            width: 100%; box-sizing: border-box; padding: 13px 14px;
+            margin-bottom: 0.75rem; border: 1px solid #d1d5db;
+            border-radius: 10px; font-size: 1rem;
+        }}
     </style>
 </head>
 <body>
@@ -162,6 +196,7 @@ async def approve_authorization(request: Request):
         <p>An application is requesting access to your memory server.</p>
         <form method="POST">
             <input type="hidden" name="id" value="{request_id}">
+            {passphrase_field}
             <button type="submit">Authorize Access</button>
         </form>
     </div>
@@ -175,11 +210,48 @@ async def approve_authorization(request: Request):
         if not request_id:
             return HTMLResponse("<h1>Missing request ID</h1>", status_code=400)
 
+        client_ip = _client_ip(request)
+        if not _approve_rate_limiter.allowed(client_ip):
+            logger.warning("Rate-limited /approve attempts from %s", client_ip)
+            return HTMLResponse(
+                "<h1>Too many attempts</h1><p>Try again later.</p>",
+                status_code=429,
+            )
+
+        # Authorize if this browser is remembered, else require the passphrase.
+        remembered = approve_gate.verify_cookie(request.cookies.get(approve_gate.COOKIE_NAME))
+        set_cookie = False
+        if remembered:
+            authorized = True
+        elif approve_gate.verify_passphrase(form.get("passphrase")):
+            authorized = True
+            set_cookie = True
+        else:
+            authorized = False
+
+        if not authorized:
+            _approve_rate_limiter.record_failure(client_ip)
+            logger.warning("Rejected /approve (bad/missing passphrase) from %s", client_ip)
+            return HTMLResponse(
+                "<h1>Authorization denied</h1><p>Incorrect or missing passphrase.</p>",
+                status_code=403,
+            )
+
         try:
             redirect_url = await oauth_provider.approve_authorization(str(request_id))
-            return RedirectResponse(url=redirect_url, status_code=302)
         except ValueError as e:
             return HTMLResponse(f"<h1>{str(e)}</h1>", status_code=400)
+
+        response = RedirectResponse(url=redirect_url, status_code=302)
+        if set_cookie:
+            token = approve_gate.make_cookie()
+            if token:
+                response.set_cookie(
+                    approve_gate.COOKIE_NAME, token,
+                    max_age=approve_gate.DEFAULT_TTL,
+                    httponly=True, secure=True, samesite="lax",
+                )
+        return response
 
 
 # ============================================

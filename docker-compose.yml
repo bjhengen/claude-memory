@@ -37,6 +37,12 @@ services:
       # Public host the server is served under (behind nginx/TLS). Set in prod env.
       PUBLIC_HOST: ${PUBLIC_HOST:-}
       OAUTH_ISSUER_URL: ${OAUTH_ISSUER_URL:-}
+      # Gate on the OAuth /approve consent page. APPROVE_PASSPHRASE is typed by
+      # the human to authorize a new client; without it the endpoint fails
+      # closed (approves nothing). APPROVE_COOKIE_SECRET signs the
+      # remember-this-browser cookie. Both come from the secrets manager in prod.
+      APPROVE_PASSPHRASE: ${APPROVE_PASSPHRASE}
+      APPROVE_COOKIE_SECRET: ${APPROVE_COOKIE_SECRET}
     ports:
       - "127.0.0.1:8004:8003"  # Only accessible from localhost for nginx proxy
     depends_on:

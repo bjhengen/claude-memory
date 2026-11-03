@@ -124,17 +124,20 @@ echo "5. Verifying secrets actually reached the container..."
 # Exported != injected: compose only passes variables DECLARED in the service's
 # environment: block, and a no-op `up -d` would leave old code running. Read
 # PID1's environment rather than trusting the deploy command's exit code.
+required_re='(OPENAI_API_KEY|ANTHROPIC_API_KEY|DATABASE_URL|APPROVE_PASSPHRASE|APPROVE_COOKIE_SECRET)'
 missing=$(ssh_run "docker exec $MCP_CONTAINER sh -c 'tr \"\\0\" \"\\n\" < /proc/1/environ' \
-    | awk -F= '/^(OPENAI_API_KEY|ANTHROPIC_API_KEY|DATABASE_URL)=/ { if (length(\$2) == 0) print \$1 }
+    | awk -F= '/^${required_re}=/ { if (length(\$2) == 0) print \$1 }
                END {}'" || true)
 present=$(ssh_run "docker exec $MCP_CONTAINER sh -c 'tr \"\\0\" \"\\n\" < /proc/1/environ' \
-    | grep -cE '^(OPENAI_API_KEY|ANTHROPIC_API_KEY|DATABASE_URL)=.'" || echo 0)
-if [ -n "$missing" ] || [ "$present" -lt 3 ]; then
-    echo "   ERROR: required env vars are empty or absent in the container: ${missing:-<not all three present>}"
-    echo "   The container is serving but will fail on embedding/judge calls. Investigate before relying on it."
+    | grep -cE '^${required_re}=.'" || echo 0)
+if [ -n "$missing" ] || [ "$present" -lt 5 ]; then
+    echo "   ERROR: required env vars are empty or absent in the container: ${missing:-<not all five present>}"
+    echo "   APPROVE_PASSPHRASE/APPROVE_COOKIE_SECRET missing means the /approve gate"
+    echo "   fails closed (connector re-auth will not work); the LLM keys gate embedding/judge."
+    echo "   Ensure both approve_* params exist under the app's SSM path, then redeploy."
     exit 1
 fi
-echo "   OPENAI_API_KEY, ANTHROPIC_API_KEY, DATABASE_URL all non-empty in PID1."
+echo "   OPENAI_API_KEY, ANTHROPIC_API_KEY, DATABASE_URL, APPROVE_PASSPHRASE, APPROVE_COOKIE_SECRET all non-empty in PID1."
 
 echo "6. Container state:"
 ssh_run "docker ps --filter name=claude_memory --format '   {{.Names}}\t{{.Status}}'"
