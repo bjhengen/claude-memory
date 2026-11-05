@@ -4,6 +4,7 @@ import json
 from mcp.server.fastmcp import Context
 
 from src.server import mcp
+from src.retrieval_log import log_retrieval
 from src.db import get_embedding, format_embedding
 from src.helpers import resolve_project_id
 from src.identity import stamp, assert_can_write
@@ -126,6 +127,7 @@ async def get_mcp_server(name: str, ctx: Context = None) -> str:
     )
 
     if not row:
+        await log_retrieval(ctx, "get_mcp_server")
         return json.dumps({"error": f"MCP server '{name}' not found"})
 
     # Get tools
@@ -150,6 +152,7 @@ async def get_mcp_server(name: str, ctx: Context = None) -> str:
         row["id"]
     )
 
+    await log_retrieval(ctx, "get_mcp_server", [("mcp_server", row["id"])])
     return json.dumps({
         "name": row["name"],
         "description": row["description"],
@@ -522,7 +525,7 @@ async def find_mcp_tools(
     params.append(limit)
     rows = await app.db.fetch(
         f"""
-        SELECT t.tool_name, t.description as tool_description, t.parameters,
+        SELECT t.id, t.tool_name, t.description as tool_description, t.parameters,
                s.name as server_name, s.description as server_description,
                s.url, s.transport, s.auth_type, s.auth_hint,
                m.name as machine_name,
@@ -557,4 +560,5 @@ async def find_mcp_tools(
             "similarity": round(row["similarity"], 3)
         })
 
+    await log_retrieval(ctx, "find_mcp_tools", [("mcp_tool", row["id"]) for row in rows])
     return json.dumps({"tools": results})

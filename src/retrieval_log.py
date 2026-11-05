@@ -13,7 +13,7 @@ from src.identity import stamp
 
 logger = logging.getLogger(__name__)
 
-LOG_TIMEOUT_S = 2.0
+LOG_TIMEOUT_S = 0.25
 
 
 async def log_retrieval(ctx, tool: str, items: Iterable[tuple[str, int]] = ()) -> None:

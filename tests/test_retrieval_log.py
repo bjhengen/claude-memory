@@ -7,6 +7,7 @@ transcripts. It holds ids only, and a logging failure must never break a read.
 import asyncio
 import json
 import logging
+import time
 import uuid
 from unittest.mock import MagicMock
 
@@ -17,12 +18,14 @@ from src.db import format_embedding
 from src.identity import Identity, reset_identity, set_identity
 from src.server import AppContext
 from src.tools.admin import check_guardrails
+from src.tools.agents import get_agent, suggest_agent
 from src.tools.annotations import get_annotations
 from src.tools.infra import get_connectivity
 from src.tools.journal import read_journal
+from src.tools.mcp_registry import find_mcp_tools, get_mcp_server
 from src.tools.projects import get_project, get_project_claude_md
 from src.tools.search import find_context, search, search_lessons
-from src.tools.specs import get_spec, search_specs
+from src.tools.specs import get_spec, list_specs, search_specs
 
 VEC = format_embedding([0.1] * 1536)
 
@@ -369,3 +372,169 @@ async def test_a_hung_log_write_does_not_hang_the_read(
     ))
 
     assert [l["id"] for l in output["lessons"]] == [lesson_id]
+
+
+@pytest.mark.asyncio
+async def test_a_hung_log_write_is_cut_off_quickly_by_default(db_pool, client, project):
+    await _seed_lesson(db_pool, project[1])
+
+    started = time.monotonic()
+    await search_lessons(project=project[0], ctx=_ctx(FailingLogPool(db_pool, hang=True)))
+
+    assert time.monotonic() - started < 1.0
+
+
+@pytest.mark.asyncio
+async def test_an_unauthenticated_read_still_logs_with_no_client(db_pool, project):
+    reset_identity()
+
+    await get_project(name=project[0], ctx=_ctx(db_pool))
+
+    rows = await db_pool.fetch(
+        """SELECT * FROM retrieval_log WHERE tool = 'get_project'
+           AND items @> $1::jsonb""",
+        json.dumps([{"type": "project", "id": project[1]}]))
+    assert len(rows) == 1
+    assert rows[0]["source_client_id"] is None
+    await db_pool.execute("DELETE FROM retrieval_log WHERE id = $1", rows[0]["id"])
+
+
+async def _seed_agents(pool, project_id, count):
+    suffix = uuid.uuid4().hex[:10]
+    ids = {}
+    for n in range(count):
+        name = f"rl-agent-{suffix}-{n}"
+        row = await pool.fetchrow(
+            """INSERT INTO agent_specs (name, description, spec_content, embedding, project_id)
+               VALUES ($1, 'd', 'c', $2::vector, $3) RETURNING id""",
+            name, VEC, project_id)
+        ids[name] = row["id"]
+    return ids
+
+
+async def _drop_agents(pool, ids):
+    await pool.execute("DELETE FROM agent_specs WHERE id = ANY($1::int[])", list(ids.values()))
+
+
+@pytest.mark.asyncio
+async def test_find_context_logs_only_the_agents_it_returned(
+        db_pool, mock_openai, client, project):
+    ids = await _seed_agents(db_pool, project[1], 5)
+    try:
+        output = json.loads(await find_context(
+            query="x", project=project[0], tiers=["agents"], limit_per_tier=3,
+            ctx=_ctx(db_pool, mock_openai)))
+
+        row = await _only_row(db_pool, client)
+        returned = {ids[a["name"]] for a in output["agents"] if a["name"] in ids}
+        assert len(returned) == 3
+        assert {i for kind, i in _items(row) if kind == "agent"} >= returned
+        assert row["result_count"] == len(output["agents"])
+    finally:
+        await _drop_agents(db_pool, ids)
+
+
+@pytest.mark.asyncio
+async def test_get_agent_records_agent_id(db_pool, client, project):
+    ids = await _seed_agents(db_pool, project[1], 1)
+    name, agent_id = next(iter(ids.items()))
+    try:
+        await get_agent(name=name, ctx=_ctx(db_pool))
+
+        row = await _only_row(db_pool, client)
+        assert row["tool"] == "get_agent"
+        assert _items(row) == [("agent", agent_id)]
+    finally:
+        await _drop_agents(db_pool, ids)
+
+
+@pytest.mark.asyncio
+async def test_get_agent_not_found_logs_zero_results(db_pool, client):
+    await get_agent(name=f"missing-{uuid.uuid4().hex}", ctx=_ctx(db_pool))
+
+    row = await _only_row(db_pool, client)
+    assert row["tool"] == "get_agent"
+    assert row["result_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_suggest_agent_logs_only_the_agents_it_suggested(
+        db_pool, mock_openai, client, project):
+    ids = await _seed_agents(db_pool, project[1], 5)
+    try:
+        output = json.loads(await suggest_agent(
+            task_description="x", project=project[0], ctx=_ctx(db_pool, mock_openai)))
+
+        row = await _only_row(db_pool, client)
+        assert row["tool"] == "suggest_agent"
+        assert row["result_count"] == len(output["suggested_agents"]) == 3
+        logged = {i for kind, i in _items(row) if kind == "agent"}
+        assert logged == {ids[a["name"]] for a in output["suggested_agents"] if a["name"] in ids}
+    finally:
+        await _drop_agents(db_pool, ids)
+
+
+async def _seed_mcp(pool, project_id):
+    suffix = uuid.uuid4().hex[:10]
+    server = await pool.fetchrow(
+        """INSERT INTO mcp_servers (name, description, transport)
+           VALUES ($1, 'd', 'http') RETURNING id, name""", f"rl-server-{suffix}")
+    tool = await pool.fetchrow(
+        """INSERT INTO mcp_server_tools (server_id, tool_name, description, embedding)
+           VALUES ($1, 'rl_tool', 'd', $2::vector) RETURNING id""", server["id"], VEC)
+    await pool.execute(
+        "INSERT INTO mcp_server_projects (server_id, project_id) VALUES ($1, $2)",
+        server["id"], project_id)
+    return server, tool
+
+
+async def _drop_mcp(pool, server, tool):
+    await pool.execute("DELETE FROM mcp_server_projects WHERE server_id = $1", server["id"])
+    await pool.execute("DELETE FROM mcp_server_tools WHERE id = $1", tool["id"])
+    await pool.execute("DELETE FROM mcp_servers WHERE id = $1", server["id"])
+
+
+@pytest.mark.asyncio
+async def test_get_mcp_server_records_server_id(db_pool, client, project):
+    server, tool = await _seed_mcp(db_pool, project[1])
+    try:
+        await get_mcp_server(name=server["name"], ctx=_ctx(db_pool))
+
+        row = await _only_row(db_pool, client)
+        assert row["tool"] == "get_mcp_server"
+        assert _items(row) == [("mcp_server", server["id"])]
+    finally:
+        await _drop_mcp(db_pool, server, tool)
+
+
+@pytest.mark.asyncio
+async def test_get_mcp_server_not_found_logs_zero_results(db_pool, client):
+    await get_mcp_server(name=f"missing-{uuid.uuid4().hex}", ctx=_ctx(db_pool))
+
+    row = await _only_row(db_pool, client)
+    assert row["tool"] == "get_mcp_server"
+    assert row["result_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_find_mcp_tools_records_tool_ids(db_pool, mock_openai, client, project):
+    server, tool = await _seed_mcp(db_pool, project[1])
+    try:
+        await find_mcp_tools(query="x", project=project[0], ctx=_ctx(db_pool, mock_openai))
+
+        row = await _only_row(db_pool, client)
+        assert row["tool"] == "find_mcp_tools"
+        assert _items(row) == [("mcp_tool", tool["id"])]
+    finally:
+        await _drop_mcp(db_pool, server, tool)
+
+
+@pytest.mark.asyncio
+async def test_list_specs_records_spec_ids(db_pool, client, project):
+    spec_id = await _seed_spec(db_pool, project[1])
+
+    await list_specs(project=project[0], ctx=_ctx(db_pool))
+
+    row = await _only_row(db_pool, client)
+    assert row["tool"] == "list_specs"
+    assert _items(row) == [("spec", spec_id)]

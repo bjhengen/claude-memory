@@ -272,6 +272,7 @@ async def list_specs(
             "retired": row["retired_at"] is not None
         })
 
+    await log_retrieval(ctx, "list_specs", [("spec", s["id"]) for s in specs])
     return json.dumps({"specifications": specs})
 
 

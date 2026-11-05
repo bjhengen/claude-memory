@@ -4,6 +4,7 @@ import json
 from mcp.server.fastmcp import Context
 
 from src.server import mcp
+from src.retrieval_log import log_retrieval
 from src.db import get_embedding, format_embedding
 from src.helpers import resolve_project_id, fetch_annotations
 from src.identity import stamp, assert_can_write
@@ -121,10 +122,12 @@ async def get_agent(name: str, ctx: Context = None) -> str:
     )
 
     if not row:
+        await log_retrieval(ctx, "get_agent")
         return json.dumps({"error": f"Agent '{name}' not found or is retired"})
 
     annotations = await fetch_annotations(app.db, "agent", row["id"])
 
+    await log_retrieval(ctx, "get_agent", [("agent", row["id"])])
     return json.dumps({
         "name": row["name"],
         "description": row["description"],
@@ -418,6 +421,8 @@ async def suggest_agent(
     top_score = top_3[0]["combined_score"] if top_3 else 0
     confidence = "high" if top_score >= 0.7 else "medium" if top_score >= 0.5 else "low"
 
+    agent_ids = {row["name"]: row["id"] for row in rows}
+    await log_retrieval(ctx, "suggest_agent", [("agent", agent_ids[a["name"]]) for a in top_3])
     return json.dumps({
         "task": task_description,
         "recommendation": top_3[0]["name"] if top_3 else None,
