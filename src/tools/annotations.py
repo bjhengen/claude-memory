@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from mcp.server.fastmcp import Context
 
 from src.server import mcp
+from src.retrieval_log import log_retrieval
 from src.identity import stamp, assert_can_write
 
 
@@ -114,6 +115,7 @@ async def get_annotations(
         for r in rows
     ]
 
+    await log_retrieval(ctx, "get_annotations", [("annotation", a["id"]) for a in annotations])
     return json.dumps({
         "entity_type": entity_type,
         "entity_id": entity_id,

@@ -4,6 +4,7 @@ import json
 from mcp.server.fastmcp import Context
 
 from src.server import mcp
+from src.retrieval_log import log_retrieval
 from src.db import get_embedding, format_embedding
 from src.helpers import resolve_project_id, fetch_annotations
 from src.identity import stamp, assert_can_write
@@ -86,9 +87,11 @@ async def get_spec(spec_id: int, ctx: Context = None) -> str:
     )
 
     if not row:
+        await log_retrieval(ctx, "get_spec")
         return json.dumps({"error": f"Specification {spec_id} not found"})
 
     annotations = await fetch_annotations(app.db, "spec", spec_id)
+    await log_retrieval(ctx, "get_spec", [("spec", spec_id)])
 
     return json.dumps({
         "id": row["id"],
@@ -385,4 +388,5 @@ async def search_specs(
             "similarity": round(row["similarity"], 3)
         })
 
+    await log_retrieval(ctx, "search_specs", [("spec", r["id"]) for r in results])
     return json.dumps({"specifications": results})

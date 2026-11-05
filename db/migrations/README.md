@@ -18,6 +18,7 @@ its header for the regeneration procedure).
 | 9 | `v7_complement_verdict.sql` | 2026-07-06: judge complement bucket |
 | 10 | `v8_client_last_seen.sql` | 2026-07-06: oauth last-seen |
 | 11 | `v9_recency_ranking.sql` | 2026-07-06: memory_rank + semantic_search v2 |
+| 12 | `v10_retrieval_log.sql` | 2026-11-04: per-client log of returned ids |
 
 `001_add_journal.sql` is a redundant IF-NOT-EXISTS predecessor of the journal
 table already created in `001_initial_schema.sql`; skip it.

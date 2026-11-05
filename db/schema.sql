@@ -2,7 +2,7 @@
 -- PostgreSQL 16 + pgvector
 --
 -- GENERATED FILE - do not hand-edit table definitions here.
--- Regenerated 2026-07-06 (post-P1) by applying the full migration chain to a
+-- Regenerated 2026-11-04 by applying the full migration chain to a
 -- fresh database and dumping it:
 --   migrations/001_initial_schema.sql
 --   migrations/002_v2_features.sql
@@ -15,6 +15,7 @@
 --   db/migrations/v7_complement_verdict.sql
 --   db/migrations/v8_client_last_seen.sql
 --   db/migrations/v9_recency_ranking.sql
+--   db/migrations/v10_retrieval_log.sql
 -- (db/migrations/001_add_journal.sql is a redundant IF-NOT-EXISTS predecessor
 --  of the journal table already created in 001_initial_schema.sql.)
 --
@@ -32,8 +33,8 @@
 --
 
 
--- Dumped from database version 16.13 (Debian 16.13-1.pgdg12+1)
--- Dumped by pg_dump version 16.13 (Debian 16.13-1.pgdg12+1)
+-- Dumped from database version 16.15 (Debian 16.15-1.pgdg12+2)
+-- Dumped by pg_dump version 16.15 (Debian 16.15-1.pgdg12+2)
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;
@@ -616,7 +617,7 @@ CREATE TABLE public.backlog_analysis (
     right_source_agent text,
     cross_agent boolean GENERATED ALWAYS AS ((left_source_agent IS DISTINCT FROM right_source_agent)) STORED,
     CONSTRAINT backlog_analysis_check CHECK ((lesson_a_id < lesson_b_id)),
-    CONSTRAINT backlog_analysis_verdict_check CHECK (((verdict)::text = ANY ((ARRAY['duplicate'::character varying, 'supersedes'::character varying, 'complement'::character varying, 'contradicts'::character varying, 'unrelated'::character varying])::text[])))
+    CONSTRAINT backlog_analysis_verdict_check CHECK (((verdict)::text = ANY (ARRAY[('duplicate'::character varying)::text, ('supersedes'::character varying)::text, ('complement'::character varying)::text, ('contradicts'::character varying)::text, ('unrelated'::character varying)::text])))
 );
 
 
@@ -660,8 +661,8 @@ CREATE TABLE public.consolidation_queue (
     decision character varying(20),
     decision_note text,
     CONSTRAINT consolidation_queue_check CHECK ((new_lesson_id <> candidate_lesson_id)),
-    CONSTRAINT consolidation_queue_decision_check CHECK (((decision)::text = ANY ((ARRAY['approved'::character varying, 'rejected'::character varying])::text[]))),
-    CONSTRAINT consolidation_queue_proposed_action_check CHECK (((proposed_action)::text = ANY ((ARRAY['merged'::character varying, 'superseded'::character varying])::text[])))
+    CONSTRAINT consolidation_queue_decision_check CHECK (((decision)::text = ANY (ARRAY[('approved'::character varying)::text, ('rejected'::character varying)::text]))),
+    CONSTRAINT consolidation_queue_proposed_action_check CHECK (((proposed_action)::text = ANY (ARRAY[('merged'::character varying)::text, ('superseded'::character varying)::text])))
 );
 
 
@@ -892,7 +893,7 @@ CREATE TABLE public.lesson_conflicts (
     resolution character varying(20),
     resolution_note text,
     CONSTRAINT lesson_conflicts_check CHECK ((lesson_a_id < lesson_b_id)),
-    CONSTRAINT lesson_conflicts_resolution_check CHECK (((resolution)::text = ANY ((ARRAY['kept_a'::character varying, 'kept_b'::character varying, 'kept_both'::character varying, 'irrelevant'::character varying])::text[])))
+    CONSTRAINT lesson_conflicts_resolution_check CHECK (((resolution)::text = ANY (ARRAY[('kept_a'::character varying)::text, ('kept_b'::character varying)::text, ('kept_both'::character varying)::text, ('irrelevant'::character varying)::text])))
 );
 
 
@@ -937,7 +938,7 @@ CREATE TABLE public.lesson_merges (
     reversed_at timestamp without time zone,
     reversed_by character varying(100),
     reversed_reason text,
-    CONSTRAINT lesson_merges_action_check CHECK (((action)::text = ANY ((ARRAY['merged'::character varying, 'superseded'::character varying])::text[]))),
+    CONSTRAINT lesson_merges_action_check CHECK (((action)::text = ANY (ARRAY[('merged'::character varying)::text, ('superseded'::character varying)::text]))),
     CONSTRAINT lesson_merges_check CHECK (((auto_decided = true) OR (decided_by IS NOT NULL))),
     CONSTRAINT lesson_merges_check1 CHECK ((canonical_id <> merged_id))
 );
@@ -1371,6 +1372,40 @@ ALTER SEQUENCE public.projects_id_seq OWNED BY public.projects.id;
 
 
 --
+-- Name: retrieval_log; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.retrieval_log (
+    id bigint NOT NULL,
+    called_at timestamp without time zone DEFAULT now() NOT NULL,
+    tool character varying(64) NOT NULL,
+    source_agent character varying(64),
+    source_client_id character varying(255),
+    result_count integer NOT NULL,
+    items jsonb DEFAULT '[]'::jsonb NOT NULL
+);
+
+
+--
+-- Name: retrieval_log_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.retrieval_log_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: retrieval_log_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.retrieval_log_id_seq OWNED BY public.retrieval_log.id;
+
+
+--
 -- Name: session_items; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1670,6 +1705,13 @@ ALTER TABLE ONLY public.project_aliases ALTER COLUMN id SET DEFAULT nextval('pub
 --
 
 ALTER TABLE ONLY public.projects ALTER COLUMN id SET DEFAULT nextval('public.projects_id_seq'::regclass);
+
+
+--
+-- Name: retrieval_log id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.retrieval_log ALTER COLUMN id SET DEFAULT nextval('public.retrieval_log_id_seq'::regclass);
 
 
 --
@@ -1994,6 +2036,14 @@ ALTER TABLE ONLY public.projects
 
 ALTER TABLE ONLY public.projects
     ADD CONSTRAINT projects_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: retrieval_log retrieval_log_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.retrieval_log
+    ADD CONSTRAINT retrieval_log_pkey PRIMARY KEY (id);
 
 
 --
@@ -2327,6 +2377,20 @@ CREATE INDEX idx_project_aliases_alias ON public.project_aliases USING btree (lo
 --
 
 CREATE INDEX idx_refresh_tokens_expires ON public.oauth_refresh_tokens USING btree (expires_at);
+
+
+--
+-- Name: idx_retrieval_log_called_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_retrieval_log_called_at ON public.retrieval_log USING btree (called_at);
+
+
+--
+-- Name: idx_retrieval_log_client; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_retrieval_log_client ON public.retrieval_log USING btree (source_client_id, called_at);
 
 
 --

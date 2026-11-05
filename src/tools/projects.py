@@ -8,6 +8,7 @@ from mcp.server.fastmcp import Context
 from src.helpers import resolve_project_id
 from src.identity import stamp
 from src.server import mcp
+from src.retrieval_log import log_retrieval
 
 
 @mcp.tool()
@@ -23,6 +24,7 @@ async def get_project(name: str, ctx: Context = None) -> str:
     # Resolve project ID (case-insensitive, alias-aware)
     project_id = await resolve_project_id(app.db, name)
     if not project_id:
+        await log_retrieval(ctx, "get_project")
         return json.dumps({"error": f"Project '{name}' not found"})
 
     # Get project + computed last-activity timestamp.
@@ -131,6 +133,7 @@ async def get_project(name: str, ctx: Context = None) -> str:
         ]
     }
 
+    await log_retrieval(ctx, "get_project", [("project", project_id)])
     return json.dumps(result)
 
 
@@ -179,6 +182,7 @@ async def get_project_claude_md(project: str, ctx: Context = None) -> str:
     app = ctx.request_context.lifespan_context
     project_id = await resolve_project_id(app.db, project)
     if not project_id:
+        await log_retrieval(ctx, "get_project_claude_md")
         return json.dumps({"error": f"Project '{project}' not found"})
 
     row = await app.db.fetchrow(
@@ -186,6 +190,7 @@ async def get_project_claude_md(project: str, ctx: Context = None) -> str:
         project_id
     )
 
+    await log_retrieval(ctx, "get_project_claude_md", [("project", project_id)])
     return json.dumps({
         "project": row["name"],
         "claude_md": row["claude_md"],

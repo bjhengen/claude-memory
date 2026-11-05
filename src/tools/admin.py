@@ -5,6 +5,7 @@ import json
 from mcp.server.fastmcp import Context
 
 from src.server import mcp
+from src.retrieval_log import log_retrieval
 from src.helpers import resolve_project_id
 from src.identity import stamp
 
@@ -103,6 +104,7 @@ async def check_guardrails(
     )
 
     if not guardrails:
+        await log_retrieval(ctx, "check_guardrails")
         return json.dumps({"guardrails": [], "message": "No guardrails apply"})
 
     result = [
@@ -117,6 +119,7 @@ async def check_guardrails(
 
     critical = [g for g in result if g["severity"] == "critical"]
 
+    await log_retrieval(ctx, "check_guardrails", [("guardrail", g["id"]) for g in guardrails])
     return json.dumps({
         "guardrails": result,
         "has_critical": len(critical) > 0,

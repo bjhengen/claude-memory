@@ -5,6 +5,7 @@ import json
 from mcp.server.fastmcp import Context
 
 from src.server import mcp
+from src.retrieval_log import log_retrieval
 from src.identity import stamp
 
 
@@ -65,6 +66,11 @@ async def get_connectivity(project: str, ctx: Context = None) -> str:
         ]
     }
 
+    await log_retrieval(
+        ctx, "get_connectivity",
+        [("container", c["id"]) for c in containers]
+        + [("database", d["id"]) for d in databases],
+    )
     return json.dumps(result)
 
 

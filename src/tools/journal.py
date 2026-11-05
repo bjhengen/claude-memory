@@ -5,6 +5,7 @@ import json
 from mcp.server.fastmcp import Context
 
 from src.server import mcp
+from src.retrieval_log import log_retrieval
 from src.db import get_embedding, format_embedding
 from src.helpers import resolve_project_id
 from src.identity import stamp
@@ -167,4 +168,5 @@ async def read_journal(
             "similarity": round(row["similarity"], 3) if "similarity" in row.keys() else None
         })
 
+    await log_retrieval(ctx, "read_journal", [("journal", e["id"]) for e in entries])
     return json.dumps({"entries": entries})

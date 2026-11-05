@@ -5,6 +5,7 @@ import json
 from mcp.server.fastmcp import Context
 
 from src.server import mcp
+from src.retrieval_log import log_retrieval
 from src.db import get_embedding, format_embedding
 from src.helpers import resolve_project_id
 
@@ -39,6 +40,7 @@ async def search(
     )
 
     if not rows:
+        await log_retrieval(ctx, "search")
         return json.dumps({"results": [], "message": "No matches found"})
 
     results = []
@@ -56,6 +58,7 @@ async def search(
             result["downvotes"] = row["downvotes"]
         results.append(result)
 
+    await log_retrieval(ctx, "search", [(r["type"], r["id"]) for r in results])
     return json.dumps({"results": results})
 
 
@@ -177,6 +180,7 @@ async def search_lessons(
         }
         results.append(result)
 
+    await log_retrieval(ctx, "search_lessons", [("lesson", r["id"]) for r in results])
     return json.dumps({"lessons": results})
 
 
@@ -211,6 +215,7 @@ async def find_context(
 
     active_tiers = tiers or ["agents", "specs", "lessons", "mcp_tools"]
     result = {"query": query}
+    returned = []
 
     # --- Agents tier ---
     if "agents" in active_tiers:
@@ -230,7 +235,7 @@ async def find_context(
 
         rows = await app.db.fetch(
             f"""
-            SELECT a.name, a.description, a.model, a.triggers,
+            SELECT a.id, a.name, a.description, a.model, a.triggers,
                    p.name as project_name,
                    1 - (a.embedding <=> $1::vector) as similarity
             FROM agent_specs a
@@ -245,6 +250,7 @@ async def find_context(
         # Trigger keyword scoring — same formula as suggest_agent.
         from src.tools.agents import score_triggers
         agents = []
+        agent_ids = {row["name"]: row["id"] for row in rows}
         for row in rows:
             semantic = float(row["similarity"])
             trigger_score, matched = score_triggers(query, row["triggers"])
@@ -261,6 +267,7 @@ async def find_context(
             })
         agents.sort(key=lambda x: x["similarity"], reverse=True)
         result["agents"] = agents[:limit_per_tier]
+        returned.extend(("agent", agent_ids[a["name"]]) for a in result["agents"])
 
     # --- Specifications tier ---
     if "specs" in active_tiers:
@@ -305,6 +312,7 @@ async def find_context(
             }
             for row in rows
         ]
+        returned.extend(("spec", row["id"]) for row in rows)
 
     # --- Lessons tier ---
     if "lessons" in active_tiers:
@@ -361,6 +369,7 @@ async def find_context(
             }
             for row in rows
         ]
+        returned.extend(("lesson", row["id"]) for row in rows)
 
     # --- MCP tools tier ---
     if "mcp_tools" in active_tiers:
@@ -380,7 +389,7 @@ async def find_context(
 
         rows = await app.db.fetch(
             f"""
-            SELECT t.tool_name, t.description as tool_description,
+            SELECT t.id, t.tool_name, t.description as tool_description,
                    s.name as server_name, s.url, s.transport,
                    m.name as machine_name,
                    1 - (t.embedding <=> $1::vector) as similarity
@@ -410,5 +419,7 @@ async def find_context(
             }
             for row in rows
         ]
+        returned.extend(("mcp_tool", row["id"]) for row in rows)
 
+    await log_retrieval(ctx, "find_context", returned)
     return json.dumps(result)
